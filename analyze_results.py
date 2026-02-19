@@ -35,11 +35,15 @@ plt.rcParams.update({
 COL_W = 3.25   # ACL single-column width (inches)
 FULL_W = 6.75  # ACL full-page width (inches)
 
-MODELS = ["claude-sonnet-4.5", "llama-3.3-70b", "gpt-5.2-chat"]
-MODEL_LABELS = {"claude-sonnet-4.5": "Sonnet 4.5", "llama-3.3-70b": "Llama 3.3-70B", "gpt-5.2-chat": "GPT-5.2"}
-JUDGES = ["claude-opus-4.6", "gpt-5.2", "gemini-3-pro", "kimi-k2.5", "glm-5"]
-JUDGE_LABELS = {"claude-opus-4.6": "Opus 4.6", "gpt-5.2": "GPT-5.2",
-                "gemini-3-pro": "Gemini 3", "kimi-k2.5": "Kimi K2.5", "glm-5": "GLM-5"}
+MODELS = ["claude-haiku-4.5", "llama-3.3-70b-instruct", "gpt-5.2-chat"]
+MODEL_LABELS = {"claude-haiku-4.5": "Haiku 4.5",
+                "llama-3.3-70b-instruct": "Llama 3.3-70B",
+                "gpt-5.2-chat": "GPT-5.2"}
+JUDGES = ["claude-sonnet-4.5", "gpt-5.2", "gemini-3-flash", "kimi-k2",
+          "llama-3.3-70b-instruct"]
+JUDGE_LABELS = {"claude-sonnet-4.5": "Sonnet 4.5", "gpt-5.2": "GPT-5.2",
+                "gemini-3-flash": "Gemini 3 Flash", "kimi-k2": "Kimi K2",
+                "llama-3.3-70b-instruct": "Llama 3.3-70B"}
 K_TOT = len(JUDGES)
 
 DATA_DIR = Path("data")
@@ -63,22 +67,26 @@ def _load_generation_stats():
     with open(gen_path) as f:
         gen_cache = json.load(f)
     stats = {}
-    for key in gen_cache:
+    for key, val in gen_cache.items():
         parts = key.split("|")
         if len(parts) != 3:
             continue
         model, qid_str, gen_str = parts
-        s = stats.setdefault(model, {"questions": set(), "total": 0})
+        s = stats.setdefault(model, {"questions": set(), "total": 0,
+                                      "two_turn": 0})
         s["questions"].add(int(qid_str))
         s["total"] += 1
+        if isinstance(val, list) and len(val) == 2:
+            s["two_turn"] += 1
     return stats
 
 
 def load_data():
     """Load from checkpoint files so analysis can run mid-experiment.
 
-    Falls back to the final all_results.json if the checkpoint files
-    don't exist (e.g. after a completed run that cleaned up).
+    Handles both the two-turn format (keys: model|qid|gen|judge|t1/t2,
+    score = average of both turns) and the legacy single-turn format
+    (keys: model|qid|gen|judge).
     """
     jdg_path = DATA_DIR / "judgments.json"
     all_path = DATA_DIR / "all_results.json"
@@ -89,33 +97,67 @@ def load_data():
         for model in MODELS:
             s = gen_stats.get(model)
             if s:
-                print(f"    {model}: {s['total']} gens across "
-                      f"{len(s['questions'])} questions")
+                print(f"    {model}: {s['total']} gens ({s['two_turn']} "
+                      f"two-turn) across {len(s['questions'])} questions")
             else:
                 print(f"    {model}: no generations yet")
 
     if jdg_path.exists():
         with open(jdg_path) as f:
             jdg_cache = json.load(f)
-        data = {}
+
+        turn_scores = {}
+        legacy_data = {}
         jdg_counts = {}
+
         for key, val in jdg_cache.items():
             parts = key.split("|")
-            if len(parts) != 4:
-                continue
-            model, qid_str, gen_str, judge = parts
             score = val.get("score") if isinstance(val, dict) else val
             if score is None:
                 continue
-            qid = int(qid_str)
-            gen_idx = int(gen_str)
-            data.setdefault(model, {}).setdefault(qid, {}).setdefault(
-                gen_idx, {}
-            )[judge] = score
-            jdg_counts[model] = jdg_counts.get(model, 0) + 1
 
-        total_scores = sum(jdg_counts.values())
-        print(f"  Judgment progress ({total_scores} scores):")
+            if len(parts) == 5:
+                model, qid_str, gen_str, judge, turn_key = parts
+                qid = int(qid_str)
+                gen_idx = int(gen_str)
+                base = (model, qid, gen_idx, judge)
+                turn_scores.setdefault(base, {})[turn_key] = score
+            elif len(parts) == 4:
+                model, qid_str, gen_str, judge = parts
+                qid = int(qid_str)
+                gen_idx = int(gen_str)
+                legacy_data.setdefault(model, {}).setdefault(
+                    qid, {}).setdefault(gen_idx, {})[judge] = score
+                jdg_counts[model] = jdg_counts.get(model, 0) + 1
+
+        if turn_scores:
+            data = {}
+            for (model, qid, gen_idx, judge), turns in turn_scores.items():
+                s1 = turns.get("t1")
+                s2 = turns.get("t2")
+                if s1 is not None and s2 is not None:
+                    avg = (s1 + s2) / 2.0
+                elif s1 is not None:
+                    avg = s1
+                elif s2 is not None:
+                    avg = s2
+                else:
+                    continue
+                data.setdefault(model, {}).setdefault(
+                    qid, {}).setdefault(gen_idx, {})[judge] = avg
+                jdg_counts[model] = jdg_counts.get(model, 0) + 1
+
+            n_pairs = sum(1 for ts in turn_scores.values()
+                          if "t1" in ts and "t2" in ts)
+            n_partial = len(turn_scores) - n_pairs
+            total = sum(jdg_counts.values())
+            print(f"  Judgment progress ({total} avg scores from "
+                  f"{n_pairs} complete pairs, {n_partial} partial):")
+        else:
+            data = legacy_data
+            total = sum(jdg_counts.values())
+            print(f"  Judgment progress ({total} scores, legacy format):")
+
         for model in MODELS:
             n_jdg = jdg_counts.get(model, 0)
             n_gen = gen_stats.get(model, {}).get("total", 0)
@@ -485,8 +527,9 @@ def write_summary(all_comp, all_ci, all_val):
     lines = []
     lines.append("=" * 72)
     lines.append("VARIANCE DECOMPOSITION RESULTS SUMMARY")
-    lines.append(f"MT-Bench  |  {len(models)}/{len(MODELS)} models with data  "
-                 f"|  {K_TOT} judges × 10 generations")
+    m_gens = all_comp[models[0]]["m"] if models else "?"
+    lines.append(f"MT-Bench (two-turn)  |  {len(models)}/{len(MODELS)} models  "
+                 f"|  {K_TOT} judges × {m_gens} generations")
     lines.append("=" * 72)
 
     for model in models:
@@ -592,8 +635,9 @@ def main():
         ci = bootstrap_ci(X, B=2000)
         all_ci[model] = ci
 
-        print("  Subsampling validation (8000 reps × 25 designs)...")
-        val = subsample_validation(X, comp, n_rep=8000)
+        n_designs = X.shape[1] * X.shape[2]
+        print(f"  Subsampling validation (10000 reps × {n_designs} designs)...")
+        val = subsample_validation(X, comp, n_rep=10000)
         all_val[model] = val
         analyzable_models.append(model)
 
