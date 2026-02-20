@@ -5,45 +5,63 @@ Variance Decomposition Analysis
 Implements ANOVA-based variance component estimation, bootstrap CIs,
 D-study predictions, subsampling validation, and ACL-style PDF plots.
 """
+
+import argparse
 import json
-import numpy as np
+
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from pathlib import Path
+
+import matplotlib.pyplot as plt
 
 # ── ACL Plot Style ───────────────────────────────────────────────────────────
 
-plt.rcParams.update({
-    "font.family": "serif",
-    "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
-    "font.size": 9,
-    "axes.labelsize": 10,
-    "axes.titlesize": 10,
-    "legend.fontsize": 8,
-    "xtick.labelsize": 8,
-    "ytick.labelsize": 8,
-    "figure.dpi": 300,
-    "savefig.dpi": 300,
-    "savefig.bbox": "tight",
-    "savefig.pad_inches": 0.05,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.grid": False,
-})
+plt.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "font.size": 9,
+        "axes.labelsize": 10,
+        "axes.titlesize": 10,
+        "legend.fontsize": 8,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.05,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": False,
+    }
+)
 
-COL_W = 3.25   # ACL single-column width (inches)
+COL_W = 3.25  # ACL single-column width (inches)
 FULL_W = 6.75  # ACL full-page width (inches)
 
 MODELS = ["claude-haiku-4.5", "llama-3.3-70b-instruct", "gpt-5.2-chat"]
-MODEL_LABELS = {"claude-haiku-4.5": "Haiku 4.5",
-                "llama-3.3-70b-instruct": "Llama 3.3-70B",
-                "gpt-5.2-chat": "GPT-5.2"}
-JUDGES = ["claude-sonnet-4.5", "gpt-5.2", "gemini-3-flash", "kimi-k2",
-          "llama-3.3-70b-instruct"]
-JUDGE_LABELS = {"claude-sonnet-4.5": "Sonnet 4.5", "gpt-5.2": "GPT-5.2",
-                "gemini-3-flash": "Gemini 3 Flash", "kimi-k2": "Kimi K2",
-                "llama-3.3-70b-instruct": "Llama 3.3-70B"}
+MODEL_LABELS = {
+    "claude-haiku-4.5": "Haiku 4.5",
+    "llama-3.3-70b-instruct": "Llama 3.3-70B",
+    "gpt-5.2-chat": "GPT-5.2",
+}
+JUDGES = [
+    "claude-sonnet-4.5",
+    "gpt-5.2",
+    "gemini-3-flash",
+    "kimi-k2",
+    "llama-3.3-70b-instruct",
+]
+JUDGE_LABELS = {
+    "claude-sonnet-4.5": "Sonnet 4.5",
+    "gpt-5.2": "GPT-5.2",
+    "gemini-3-flash": "Gemini 3 Flash",
+    "kimi-k2": "Kimi K2",
+    "llama-3.3-70b-instruct": "Llama 3.3-70B",
+}
 K_TOT = len(JUDGES)
 
 DATA_DIR = Path("data")
@@ -59,6 +77,7 @@ MODEL_COLORS = ["#2176AE", "#E84855", "#44AF69"]
 
 # ── Data Loading ─────────────────────────────────────────────────────────────
 
+
 def _load_generation_stats():
     """Count generations per model from the checkpoint file."""
     gen_path = DATA_DIR / "generations.json"
@@ -72,8 +91,7 @@ def _load_generation_stats():
         if len(parts) != 3:
             continue
         model, qid_str, gen_str = parts
-        s = stats.setdefault(model, {"questions": set(), "total": 0,
-                                      "two_turn": 0})
+        s = stats.setdefault(model, {"questions": set(), "total": 0, "two_turn": 0})
         s["questions"].add(int(qid_str))
         s["total"] += 1
         if isinstance(val, list) and len(val) == 2:
@@ -97,8 +115,10 @@ def load_data():
         for model in MODELS:
             s = gen_stats.get(model)
             if s:
-                print(f"    {model}: {s['total']} gens ({s['two_turn']} "
-                      f"two-turn) across {len(s['questions'])} questions")
+                print(
+                    f"    {model}: {s['total']} gens ({s['two_turn']} "
+                    f"two-turn) across {len(s['questions'])} questions"
+                )
             else:
                 print(f"    {model}: no generations yet")
 
@@ -126,8 +146,9 @@ def load_data():
                 model, qid_str, gen_str, judge = parts
                 qid = int(qid_str)
                 gen_idx = int(gen_str)
-                legacy_data.setdefault(model, {}).setdefault(
-                    qid, {}).setdefault(gen_idx, {})[judge] = score
+                legacy_data.setdefault(model, {}).setdefault(qid, {}).setdefault(
+                    gen_idx, {}
+                )[judge] = score
                 jdg_counts[model] = jdg_counts.get(model, 0) + 1
 
         if turn_scores:
@@ -143,16 +164,18 @@ def load_data():
                     avg = s2
                 else:
                     continue
-                data.setdefault(model, {}).setdefault(
-                    qid, {}).setdefault(gen_idx, {})[judge] = avg
+                data.setdefault(model, {}).setdefault(qid, {}).setdefault(gen_idx, {})[
+                    judge
+                ] = avg
                 jdg_counts[model] = jdg_counts.get(model, 0) + 1
 
-            n_pairs = sum(1 for ts in turn_scores.values()
-                          if "t1" in ts and "t2" in ts)
+            n_pairs = sum(1 for ts in turn_scores.values() if "t1" in ts and "t2" in ts)
             n_partial = len(turn_scores) - n_pairs
             total = sum(jdg_counts.values())
-            print(f"  Judgment progress ({total} avg scores from "
-                  f"{n_pairs} complete pairs, {n_partial} partial):")
+            print(
+                f"  Judgment progress ({total} avg scores from "
+                f"{n_pairs} complete pairs, {n_partial} partial):"
+            )
         else:
             data = legacy_data
             total = sum(jdg_counts.values())
@@ -163,8 +186,7 @@ def load_data():
             n_gen = gen_stats.get(model, {}).get("total", 0)
             expected = n_gen * K_TOT
             pct = n_jdg / expected * 100 if expected else 0
-            print(f"    {model}: {n_jdg}/{expected} judgments "
-                  f"({pct:.0f}%)")
+            print(f"    {model}: {n_jdg}/{expected} judgments ({pct:.0f}%)")
         return data
 
     if all_path.exists():
@@ -175,15 +197,13 @@ def load_data():
             s = r["score"]
             if s is None:
                 continue
-            data.setdefault(r["model"], {}).setdefault(
-                r["question_id"], {}
-            ).setdefault(r["gen_idx"], {})[r["judge"]] = s
+            data.setdefault(r["model"], {}).setdefault(r["question_id"], {}).setdefault(
+                r["gen_idx"], {}
+            )[r["judge"]] = s
         print(f"  Loaded from all_results.json")
         return data
 
-    raise FileNotFoundError(
-        f"No data files found. Expected {jdg_path} or {all_path}"
-    )
+    raise FileNotFoundError(f"No data files found. Expected {jdg_path} or {all_path}")
 
 
 def build_tensor(model_data, m_target=10):
@@ -195,15 +215,19 @@ def build_tensor(model_data, m_target=10):
         ok = True
         for g in range(m_target):
             if g not in gens:
-                ok = False; break
+                ok = False
+                break
             if any(j not in gens[g] for j in JUDGES):
-                ok = False; break
+                ok = False
+                break
         if ok:
             complete.append(qid)
     n = len(complete)
     if n == 0:
-        print(f"  WARNING: 0/{total_scenarios} scenarios fully complete "
-              f"(need {m_target} gens × {K_TOT} judges each)")
+        print(
+            f"  WARNING: 0/{total_scenarios} scenarios fully complete "
+            f"(need {m_target} gens × {K_TOT} judges each)"
+        )
     scores = np.zeros((n, m_target, K_TOT))
     for i, qid in enumerate(complete):
         for j in range(m_target):
@@ -211,25 +235,27 @@ def build_tensor(model_data, m_target=10):
                 scores[i, j, l] = model_data[qid][j][judge]
     return scores, complete
 
+
 # ── ANOVA Estimation ─────────────────────────────────────────────────────────
+
 
 def estimate_components(X):
     """Method-of-moments ANOVA on (n, m, K) array."""
     n, m, K = X.shape
     Xbar = X.mean()
-    Xbar_ij = X.mean(axis=2)          # (n, m)
-    Xbar_i  = X.mean(axis=(1, 2))     # (n,)
-    Xbar_l  = X.mean(axis=(0, 1))     # (K,)
+    Xbar_ij = X.mean(axis=2)  # (n, m)
+    Xbar_i = X.mean(axis=(1, 2))  # (n,)
+    Xbar_l = X.mean(axis=(0, 1))  # (K,)
 
     # Residual (cell × judge interaction)
     resid = X - Xbar_ij[:, :, None] - Xbar_l[None, None, :] + Xbar
     MS_W = np.sum(resid**2) / ((n * m - 1) * (K - 1))
 
     # Between-generation within scenario
-    MS_G = K * np.sum((Xbar_ij - Xbar_i[:, None])**2) / (n * (m - 1))
+    MS_G = K * np.sum((Xbar_ij - Xbar_i[:, None]) ** 2) / (n * (m - 1))
 
     # Between-scenario
-    MS_S = m * K * np.sum((Xbar_i - Xbar)**2) / max(n - 1, 1)
+    MS_S = m * K * np.sum((Xbar_i - Xbar) ** 2) / max(n - 1, 1)
 
     sig_eps = MS_W
     sig_beta = max(0.0, (MS_G - MS_W) / K)
@@ -245,7 +271,9 @@ def estimate_components(X):
         "sig_ad": float(sig_ad),
         "sig_gamma": float(sig_gamma),
         "gamma": {JUDGES[l]: float(gamma[l]) for l in range(K)},
-        "n": n, "m": m, "K": K,
+        "n": n,
+        "m": m,
+        "K": K,
     }
 
 
@@ -260,10 +288,14 @@ def bootstrap_ci(X, B=2000, alpha=0.05):
         for k in keys:
             samples[k].append(est[k])
     lo, hi = 100 * alpha / 2, 100 * (1 - alpha / 2)
-    return {k: (float(np.percentile(samples[k], lo)),
-                float(np.percentile(samples[k], hi))) for k in keys}
+    return {
+        k: (float(np.percentile(samples[k], lo)), float(np.percentile(samples[k], hi)))
+        for k in keys
+    }
+
 
 # ── D-Study / Prediction ────────────────────────────────────────────────────
+
 
 def predict_var(sig_ad, sig_beta, sig_eps, sig_gamma, n, m, K, K_tot):
     """Full benchmark variance prediction including scenario component."""
@@ -282,6 +314,17 @@ def predict_per_scenario_var(sig_beta, sig_eps, sig_gamma, n, m, K, K_tot):
     return sig_beta / (n * m) + sig_eps / (n * m * K) + sig_gamma / K * fpc
 
 
+def allocation_var(sig_beta, sig_eps, sig_gamma, m, K, K_tot):
+    """Per-scenario allocation variance V(m, K).
+
+    Excludes the scenario component (irrelevant to within-scenario
+    allocation) and does not divide by n — this is the variance of a
+    single scenario's mean score as a function of (m, K).
+    """
+    fpc = (K_tot - K) / (K_tot - 1) if K_tot > 1 and K < K_tot else 0.0
+    return sig_beta / m + sig_eps / (m * K) + sig_gamma / K * fpc
+
+
 def subsample_validation(X, comp, n_rep=10000):
     """Compare predicted vs empirical variance over all (K,m) designs.
 
@@ -295,8 +338,13 @@ def subsample_validation(X, comp, n_rep=10000):
     for K in range(1, K_max + 1):
         for m in range(1, m_max + 1):
             pred = predict_per_scenario_var(
-                comp["sig_beta"], comp["sig_eps"], comp["sig_gamma"],
-                n, m, K, K_max,
+                comp["sig_beta"],
+                comp["sig_eps"],
+                comp["sig_gamma"],
+                n,
+                m,
+                K,
+                K_max,
             )
             means = np.empty(n_rep)
             for r in range(n_rep):
@@ -307,23 +355,32 @@ def subsample_validation(X, comp, n_rep=10000):
                     s += X[i][np.ix_(gi, jj)].mean()
                 means[r] = s / n
             actual = float(np.var(means, ddof=0))
-            rows.append({"K": K, "m": m, "B": K * m,
-                          "predicted": pred, "actual": actual})
+            rows.append(
+                {"K": K, "m": m, "B": K * m, "predicted": pred, "actual": actual}
+            )
     return rows
 
+
 # ── Plotting ─────────────────────────────────────────────────────────────────
+
 
 def plot_variance_components(all_comp, all_ci):
     """Grouped bar chart of variance components across models."""
     models = [m for m in MODELS if m in all_comp]
     fig, ax = plt.subplots(figsize=(FULL_W, 2.4))
     comps = ["sig_ad", "sig_beta", "sig_eps", "sig_gamma"]
-    labels = [r"$\hat\sigma^2_{\alpha+\delta}$ (scenario)",
-              r"$\hat\sigma^2_\beta$ (generation)",
-              r"$\hat\sigma^2_\varepsilon$ (judge noise)",
-              r"$\hat\sigma^2_\gamma$ (judge bias)"]
-    clist = [COLORS["scenario"], COLORS["generation"],
-             COLORS["judge_noise"], COLORS["judge_bias"]]
+    labels = [
+        r"$\hat\sigma^2_{\alpha+\delta}$ (scenario)",
+        r"$\hat\sigma^2_\beta$ (generation)",
+        r"$\hat\sigma^2_\varepsilon$ (judge noise)",
+        r"$\hat\sigma^2_\gamma$ (judge bias)",
+    ]
+    clist = [
+        COLORS["scenario"],
+        COLORS["generation"],
+        COLORS["judge_noise"],
+        COLORS["judge_bias"],
+    ]
 
     x = np.arange(len(models))
     w = 0.18
@@ -333,12 +390,21 @@ def plot_variance_components(all_comp, all_ci):
         vals = [all_comp[m][comp_key] for m in models]
         lo = [vals[j] - all_ci[m][comp_key][0] for j, m in enumerate(models)]
         hi = [all_ci[m][comp_key][1] - vals[j] for j, m in enumerate(models)]
-        ax.bar(x + offsets[ic] * w, vals, w * 0.9, label=labels[ic],
-               color=clist[ic], yerr=[lo, hi], capsize=2, error_kw={"lw": 0.7})
+        ax.bar(
+            x + offsets[ic] * w,
+            vals,
+            w * 0.9,
+            label=labels[ic],
+            color=clist[ic],
+            yerr=[lo, hi],
+            capsize=2,
+            error_kw={"lw": 0.7},
+        )
 
     ax.set_xticks(x)
     ax.set_xticklabels([MODEL_LABELS[m] for m in models])
-    ax.set_ylabel("Variance component estimate")
+    ax.set_ylabel("Variance estimate")
+    ax.set_xlabel("Model")
     ax.legend(ncol=2, frameon=False, loc="upper right")
     fig.savefig(PLOT_DIR / "variance_components.pdf")
     plt.close(fig)
@@ -360,10 +426,19 @@ def plot_judge_biases(all_comp):
     ax.set_xticklabels([MODEL_LABELS[m] for m in models], rotation=0)
     ax.set_yticks(range(len(JUDGES)))
     ax.set_yticklabels([JUDGE_LABELS[j] for j in JUDGES])
+    ax.set_xlabel("Evaluated model")
+    ax.set_ylabel("Judge model")
     for jj in range(len(JUDGES)):
         for jm in range(len(models)):
-            ax.text(jm, jj, f"{mat[jj, jm]:+.3f}", ha="center", va="center",
-                    fontsize=7, color="white" if abs(mat[jj, jm]) > vmax * 0.6 else "black")
+            ax.text(
+                jm,
+                jj,
+                f"{mat[jj, jm]:+.3f}",
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="white" if abs(mat[jj, jm]) > vmax * 0.6 else "black",
+            )
     cb = fig.colorbar(im, ax=ax, shrink=0.85)
     cb.set_label("Judge bias " + r"$\hat\gamma_\ell$", fontsize=8)
     fig.savefig(PLOT_DIR / "judge_biases.pdf")
@@ -381,45 +456,64 @@ def plot_predicted_vs_actual(all_val):
         ax = axes[idx]
         rows = all_val[model]
         pred = np.array([r["predicted"] for r in rows])
-        act  = np.array([r["actual"] for r in rows])
+        act = np.array([r["actual"] for r in rows])
         budgets = np.array([r["B"] for r in rows])
 
         pos = (pred > 0) & (act > 0)
-        sc = ax.scatter(pred[pos], act[pos], c=budgets[pos], cmap="viridis",
-                        s=28, edgecolors="k", linewidths=0.3, zorder=3)
+        sc = ax.scatter(
+            pred[pos],
+            act[pos],
+            c=budgets[pos],
+            cmap="viridis",
+            s=28,
+            edgecolors="k",
+            linewidths=0.3,
+            zorder=3,
+        )
         if pos.any():
             lo = min(pred[pos].min(), act[pos].min()) * 0.5
             hi = max(pred[pos].max(), act[pos].max()) * 2.0
             ax.plot([lo, hi], [lo, hi], "k--", lw=0.7, alpha=0.5)
-            ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
-            ax.set_xscale("log"); ax.set_yscale("log")
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_xscale("log")
+            ax.set_yscale("log")
 
         r2 = _r2(pred[pos], act[pos]) if pos.sum() > 2 else float("nan")
         ax.text(0.05, 0.92, f"$R^2$={r2:.3f}", transform=ax.transAxes, fontsize=7)
-        ax.set_xlabel("Predicted variance")
         if idx == 0:
-            ax.set_ylabel("Actual variance (subsampled)")
+            ax.set_ylabel("Actual var. (subsampled)")
+        # Shared x-label on center panel only (ACL: one label per axis type)
+        if idx == len(models) // 2:
+            ax.set_xlabel("Predicted var.")
         ax.set_title(MODEL_LABELS[model])
 
-    for ax in axes[len(models):]:
+    for ax in axes[len(models) :]:
         ax.set_visible(False)
-    fig.colorbar(sc, ax=axes[:len(models)], label="Budget $B = mK$", shrink=0.8, pad=0.02)
-    fig.tight_layout()
+    fig.tight_layout(pad=0.8, rect=(0.06, 0, 0.88, 1))
+    cax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+    fig.colorbar(sc, cax=cax, label="Budget $B = mK$")
     fig.savefig(PLOT_DIR / "predicted_vs_actual.pdf")
     plt.close(fig)
     print(f"  Saved {PLOT_DIR / 'predicted_vs_actual.pdf'}")
 
 
 def _r2(pred, actual):
-    ss_res = np.sum((pred - actual)**2)
-    ss_tot = np.sum((actual - actual.mean())**2)
+    ss_res = np.sum((pred - actual) ** 2)
+    ss_tot = np.sum((actual - actual.mean()) ** 2)
     return 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
 
 
 def plot_strategy_comparison(all_comp):
-    """Per-scenario variance vs budget for all-judges vs max-gens strategies."""
+    """Per-scenario allocation variance vs budget for strategy comparison.
+
+    Uses V(m,K) = σ²_β/m + σ²_ε/(mK) + (σ²_γ/K)·FPC — the scenario
+    component is excluded because it doesn't depend on (m, K).
+    """
     models = [m for m in MODELS if m in all_comp]
-    fig, axes = plt.subplots(1, max(len(models), 2), figsize=(FULL_W, 2.3), sharey=False)
+    fig, axes = plt.subplots(
+        1, max(len(models), 2), figsize=(FULL_W, 2.3), sharey=False
+    )
     if not isinstance(axes, np.ndarray):
         axes = [axes]
     budgets = np.arange(1, 26)
@@ -428,54 +522,62 @@ def plot_strategy_comparison(all_comp):
         ax = axes[idx]
         c = all_comp[model]
 
-        var_allj, var_maxg, var_opt = [], [], []
+        var_allj, var_maxg = [], []
         for B in budgets:
             # All-judges: K=K_TOT, m=B/K_TOT (fractional ok for prediction)
             m_aj = B / K_TOT
-            v_aj = predict_var(c["sig_ad"], c["sig_beta"], c["sig_eps"],
-                               c["sig_gamma"], c["n"], m_aj, K_TOT, K_TOT)
+            v_aj = allocation_var(
+                c["sig_beta"], c["sig_eps"], c["sig_gamma"], m_aj, K_TOT, K_TOT
+            )
             var_allj.append(v_aj)
 
             # Max-generations: K=1, m=B
-            v_mg = predict_var(c["sig_ad"], c["sig_beta"], c["sig_eps"],
-                               c["sig_gamma"], c["n"], B, 1, K_TOT)
+            v_mg = allocation_var(
+                c["sig_beta"], c["sig_eps"], c["sig_gamma"], B, 1, K_TOT
+            )
             var_maxg.append(v_mg)
 
-            # Optimal over all integer K
-            best = np.inf
-            for K in range(1, min(K_TOT, B) + 1):
-                if B % K != 0:
-                    continue
-                m_k = B // K
-                v = predict_var(c["sig_ad"], c["sig_beta"], c["sig_eps"],
-                                c["sig_gamma"], c["n"], m_k, K, K_TOT)
-                best = min(best, v)
-            var_opt.append(best)
-
-        ax.semilogy(budgets, var_allj, "-o", ms=3, lw=1.2, label=f"All judges ($K$={K_TOT})")
+        ax.semilogy(
+            budgets, var_allj, "-o", ms=3, lw=1.2, label=f"All judges ($K$={K_TOT})"
+        )
         ax.semilogy(budgets, var_maxg, "-s", ms=3, lw=1.2, label="Max gens ($K$=1)")
-        ax.semilogy(budgets, var_opt, "-^", ms=3, lw=1.2, label="Optimal $K$", color="green")
 
-        # Mark break-even
+        # Mark break-even: B* = (K_tot - 1) · σ²_β / σ²_γ
         if c["sig_gamma"] > 0 and c["sig_beta"] > 0:
             B_star = (K_TOT - 1) * c["sig_beta"] / c["sig_gamma"]
             if 0 < B_star < 25:
                 ax.axvline(B_star, ls=":", color="gray", lw=0.8)
                 ylims = ax.get_ylim()
-                ax.text(B_star + 0.5, ylims[0] * (ylims[1]/ylims[0])**0.1,
-                        f"$B^*$={B_star:.0f}", fontsize=7, color="gray")
+                ax.text(
+                    B_star + 0.5,
+                    ylims[0] * (ylims[1] / ylims[0]) ** 0.1,
+                    f"$B^*$={B_star:.0f}",
+                    fontsize=7,
+                    color="gray",
+                )
 
-        ax.set_xlabel("Per-scenario budget $B$")
         if idx == 0:
-            ax.set_ylabel("Total benchmark variance")
+            ax.set_ylabel("Var. (excl. scenario)")
+        # Shared x-label on center panel only (ACL multi-panel convention)
+        if idx == len(models) // 2:
+            ax.set_xlabel("Per-scenario budget $B$")
         ax.set_title(MODEL_LABELS[model])
-        if idx == 2:
-            ax.legend(frameon=False, fontsize=7, loc="upper right")
 
-    for ax in axes[len(models):]:
+    # Single shared legend below panels (ACL: one legend per figure)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.02),
+        ncol=2,
+        frameon=False,
+        fontsize=7,
+    )
+    for ax in axes[len(models) :]:
         ax.set_visible(False)
-    fig.tight_layout()
-    fig.savefig(PLOT_DIR / "strategy_comparison.pdf")
+    fig.savefig(PLOT_DIR / "strategy_comparison.pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {PLOT_DIR / 'strategy_comparison.pdf'}")
 
@@ -486,8 +588,12 @@ def plot_decomposition_stacked(all_comp):
     fig, ax = plt.subplots(figsize=(COL_W, 2.4))
     comps_keys = ["sig_ad", "sig_beta", "sig_eps", "sig_gamma"]
     comp_labels = ["Scenario", "Generation", "Judge noise", "Judge bias"]
-    clist = [COLORS["scenario"], COLORS["generation"],
-             COLORS["judge_noise"], COLORS["judge_bias"]]
+    clist = [
+        COLORS["scenario"],
+        COLORS["generation"],
+        COLORS["judge_noise"],
+        COLORS["judge_bias"],
+    ]
 
     x = np.arange(len(models))
     bottom = np.zeros(len(models))
@@ -513,14 +619,17 @@ def plot_decomposition_stacked(all_comp):
 
     ax.set_xticks(x)
     ax.set_xticklabels([MODEL_LABELS[m] for m in models])
+    ax.set_xlabel("Model")
     ax.set_ylabel("Benchmark score variance")
-    ax.legend(frameon=False, fontsize=7)
+    ax.legend(frameon=False, fontsize=7, loc="upper right")
     ax.ticklabel_format(axis="y", style="sci", scilimits=(-3, -3))
     fig.savefig(PLOT_DIR / "decomposition_operating_point.pdf")
     plt.close(fig)
     print(f"  Saved {PLOT_DIR / 'decomposition_operating_point.pdf'}")
 
+
 # ── Summary ──────────────────────────────────────────────────────────────────
+
 
 def write_summary(all_comp, all_ci, all_val):
     models = [m for m in MODELS if m in all_comp]
@@ -528,8 +637,10 @@ def write_summary(all_comp, all_ci, all_val):
     lines.append("=" * 72)
     lines.append("VARIANCE DECOMPOSITION RESULTS SUMMARY")
     m_gens = all_comp[models[0]]["m"] if models else "?"
-    lines.append(f"MT-Bench (two-turn)  |  {len(models)}/{len(MODELS)} models  "
-                 f"|  {K_TOT} judges × {m_gens} generations")
+    lines.append(
+        f"MT-Bench (two-turn)  |  {len(models)}/{len(MODELS)} models  "
+        f"|  {K_TOT} judges × {m_gens} generations"
+    )
     lines.append("=" * 72)
 
     for model in models:
@@ -540,28 +651,44 @@ def write_summary(all_comp, all_ci, all_val):
         lines.append(f"\n{'─' * 72}")
         lines.append(f"Model: {model}")
         lines.append(f"  Scenarios used: {n}/80  |  Generations: {m}  |  Judges: {K}")
-        lines.append(f"\n  Estimated true score (μ):  {c['mu']:.4f}  "
-                      f"95% CI [{ci['mu'][0]:.4f}, {ci['mu'][1]:.4f}]")
+        lines.append(
+            f"\n  Estimated true score (μ):  {c['mu']:.4f}  "
+            f"95% CI [{ci['mu'][0]:.4f}, {ci['mu'][1]:.4f}]"
+        )
 
-        total_var = predict_var(c["sig_ad"], c["sig_beta"], c["sig_eps"],
-                                c["sig_gamma"], n, m, K, K_TOT)
+        total_var = predict_var(
+            c["sig_ad"], c["sig_beta"], c["sig_eps"], c["sig_gamma"], n, m, K, K_TOT
+        )
         se = np.sqrt(total_var)
         lines.append(f"  Standard error:            {se:.4f}")
-        lines.append(f"  95% CI for μ:              [{c['mu'] - 1.96*se:.4f}, "
-                      f"{c['mu'] + 1.96*se:.4f}]")
+        lines.append(
+            f"  95% CI for μ:              [{c['mu'] - 1.96 * se:.4f}, "
+            f"{c['mu'] + 1.96 * se:.4f}]"
+        )
 
         lines.append(f"\n  Variance components (raw):")
-        for key, label in [("sig_ad", "σ²(α+δ) scenario"), ("sig_beta", "σ²β generation"),
-                           ("sig_eps", "σ²ε judge noise"), ("sig_gamma", "σ²γ judge bias")]:
-            lines.append(f"    {label:26s} = {c[key]:.6f}  "
-                          f"CI [{ci[key][0]:.6f}, {ci[key][1]:.6f}]")
+        for key, label in [
+            ("sig_ad", "σ²(α+δ) scenario"),
+            ("sig_beta", "σ²β generation"),
+            ("sig_eps", "σ²ε judge noise"),
+            ("sig_gamma", "σ²γ judge bias"),
+        ]:
+            lines.append(
+                f"    {label:26s} = {c[key]:.6f}  "
+                f"CI [{ci[key][0]:.6f}, {ci[key][1]:.6f}]"
+            )
 
-        lines.append(f"\n  Variance decomposition at operating point (n={n}, m={m}, K={K}):")
+        lines.append(
+            f"\n  Variance decomposition at operating point (n={n}, m={m}, K={K}):"
+        )
         parts = [
             ("Scenario σ²(α+δ)/n", c["sig_ad"] / n),
             ("Generation σ²β/(nm)", c["sig_beta"] / (n * m)),
             ("Judge noise σ²ε/(nmK)", c["sig_eps"] / (n * m * K)),
-            ("Judge bias (FPC)", c["sig_gamma"] / K * ((K_TOT-K)/(K_TOT-1) if K < K_TOT else 0)),
+            (
+                "Judge bias (FPC)",
+                c["sig_gamma"] / K * ((K_TOT - K) / (K_TOT - 1) if K < K_TOT else 0),
+            ),
         ]
         for label, v in parts:
             pct = v / total_var * 100 if total_var > 0 else 0
@@ -598,9 +725,18 @@ def write_summary(all_comp, all_ci, all_val):
     print(txt)
     print(f"\n  Saved results_summary.txt")
 
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+
 def main():
+    p = argparse.ArgumentParser(description="Variance decomposition analysis and plots")
+    p.add_argument(
+        "--quick", action="store_true", help="Small subsample for fast plot-style check"
+    )
+    args = p.parse_args()
+    quick = args.quick
+
     PLOT_DIR.mkdir(exist_ok=True)
 
     print("Loading data...")
@@ -609,6 +745,13 @@ def main():
     all_comp = {}
     all_ci = {}
     all_val = {}
+
+    n_scenarios_cap = 15 if quick else None
+    bootstrap_B = 100 if quick else 2000
+    subsample_n_rep = 500 if quick else 10000
+
+    if quick:
+        print("  [--quick] Using small subsample for plot-style check.")
 
     analyzable_models = []
     for model in MODELS:
@@ -620,24 +763,35 @@ def main():
             continue
         X, qids = build_tensor(md)
         if X.shape[0] == 0:
-            print(f"  SKIPPED — no complete scenarios yet (need 10 gens × {K_TOT} judges)")
+            print(
+                f"  SKIPPED — no complete scenarios yet (need 10 gens × {K_TOT} judges)"
+            )
             continue
-        print(f"  Tensor shape: {X.shape}  (n={X.shape[0]}, m={X.shape[1]}, K={X.shape[2]})")
+        if n_scenarios_cap is not None and X.shape[0] > n_scenarios_cap:
+            X = X[:n_scenarios_cap]
+            print(f"  Subsampled to first {n_scenarios_cap} scenarios")
+        print(
+            f"  Tensor shape: {X.shape}  (n={X.shape[0]}, m={X.shape[1]}, K={X.shape[2]})"
+        )
 
         comp = estimate_components(X)
         all_comp[model] = comp
 
         print(f"  μ = {comp['mu']:.4f}")
-        print(f"  σ²ε={comp['sig_eps']:.4f}  σ²β={comp['sig_beta']:.4f}  "
-              f"σ²(α+δ)={comp['sig_ad']:.4f}  σ²γ={comp['sig_gamma']:.4f}")
+        print(
+            f"  σ²ε={comp['sig_eps']:.4f}  σ²β={comp['sig_beta']:.4f}  "
+            f"σ²(α+δ)={comp['sig_ad']:.4f}  σ²γ={comp['sig_gamma']:.4f}"
+        )
 
-        print("  Bootstrap CIs (2000 resamples)...")
-        ci = bootstrap_ci(X, B=2000)
+        print(f"  Bootstrap CIs ({bootstrap_B} resamples)...")
+        ci = bootstrap_ci(X, B=bootstrap_B)
         all_ci[model] = ci
 
         n_designs = X.shape[1] * X.shape[2]
-        print(f"  Subsampling validation (10000 reps × {n_designs} designs)...")
-        val = subsample_validation(X, comp, n_rep=10000)
+        print(
+            f"  Subsampling validation ({subsample_n_rep} reps × {n_designs} designs)..."
+        )
+        val = subsample_validation(X, comp, n_rep=subsample_n_rep)
         all_val[model] = val
         analyzable_models.append(model)
 
