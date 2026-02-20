@@ -517,28 +517,31 @@ def plot_strategy_comparison(all_comp):
     if not isinstance(axes, np.ndarray):
         axes = [axes]
     budgets = np.arange(1, 26)
+    budgets_allj = np.arange(K_TOT, 26, K_TOT)  # B = K, 2K, ... (valid m = B//K)
 
     for idx, model in enumerate(models):
         ax = axes[idx]
         c = all_comp[model]
 
-        var_allj, var_maxg = [], []
-        for B in budgets:
-            # All-judges: K=K_TOT, m=B/K_TOT (fractional ok for prediction)
-            m_aj = B / K_TOT
+        # All-judges: only at B = K, 2K, 3K, ...; m = B // K (integer)
+        var_allj = []
+        for B in budgets_allj:
+            m_aj = B // K_TOT
             v_aj = allocation_var(
                 c["sig_beta"], c["sig_eps"], c["sig_gamma"], m_aj, K_TOT, K_TOT
             )
             var_allj.append(v_aj)
 
-            # Max-generations: K=1, m=B
+        # Max-generations: every integer B = 1, 2, ..., 25 (K=1, m=B)
+        var_maxg = []
+        for B in budgets:
             v_mg = allocation_var(
                 c["sig_beta"], c["sig_eps"], c["sig_gamma"], B, 1, K_TOT
             )
             var_maxg.append(v_mg)
 
         ax.semilogy(
-            budgets, var_allj, "-o", ms=3, lw=1.2, label=f"All judges ($K$={K_TOT})"
+            budgets_allj, var_allj, "-o", ms=3, lw=1.2, label=f"All judges ($K$={K_TOT})"
         )
         ax.semilogy(budgets, var_maxg, "-s", ms=3, lw=1.2, label="Max gens ($K$=1)")
 

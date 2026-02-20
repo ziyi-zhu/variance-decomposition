@@ -2,5 +2,9 @@
 __pycache__
 data
 plots
-main.tex
 results_summary.txt
+
+main.tex
+references.bib
+acl.sty
+acl_natbib.bst
