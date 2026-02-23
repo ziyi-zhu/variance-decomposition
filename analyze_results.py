@@ -220,11 +220,11 @@ def print_decomposition_table(all_comp, all_ci):
     lines.append("-" * 92)
 
     rows = [
-        ("μ (mean score)", "mu"),
-        ("σ²(α+δ) scenario", "sig_ad"),
-        ("σ²β generation", "sig_beta"),
-        ("σ²ε judge noise", "sig_eps"),
-        ("σ²γ judge bias", "sig_gamma"),
+        ("\u03bc\u03b8 (mean score)", "mu"),
+        ("\u03c3\u00b2_D (dataset)", "sig_ad"),
+        ("\u03c3\u00b2_\u03b8 (model)", "sig_beta"),
+        ("\u03c3\u00b2\u03b5 (residual)", "sig_eps"),
+        ("\u03c3\u00b2\u03b3 (judge bias)", "sig_gamma"),
     ]
     for label, key in rows:
         line = f"{label:<28s}"
@@ -236,7 +236,7 @@ def print_decomposition_table(all_comp, all_ci):
 
     lines.append("-" * 92)
     lines.append("")
-    lines.append("Judge biases (γ̂):")
+    lines.append("Judge biases (\u03b3\u0302):")
     jh = f"{'Judge':<20s}"
     for m in models:
         jh += f" | {MODEL_LABELS[m]:>12s}"
@@ -251,7 +251,7 @@ def print_decomposition_table(all_comp, all_ci):
     txt = "\n".join(lines)
     print("\n" + txt)
     Path("results_summary.txt").write_text(txt)
-    print(f"\n  Saved results_summary.txt")
+    print("\n  Saved results_summary.txt")
 
 
 # ── Plotting ─────────────────────────────────────────────────────────────────
@@ -325,14 +325,32 @@ def subsample_benchmark(X, strategy, budget, n_rep, rng):
     raise ValueError(f"Unknown strategy: {strategy}")
 
 
+def compute_prediction_constants(X):
+    """Compute exact V(B) = C/(nB) constants directly from the data tensor.
+
+    For bootstrap with replacement, each draw is i.i.d. from the empirical
+    pool, so Var(mean of m draws) = pool_variance / m.  The three constants
+    are the pool variances relevant to each strategy:
+      all_judges:  pool = generation-level means (averaged over K judges)
+      random_1:    pool = all individual cells (scenario x gen x judge)
+      cycle:       pool = within-judge columns (one per judge per scenario)
+    """
+    n, m_max, K = X.shape
+    gen_means = X.mean(axis=2)  # (n, m_max)
+    C_all = K * float(gen_means.var(axis=1).mean())
+    C_random = float(X.reshape(n, -1).var(axis=1).mean())
+    C_cycle = float(X.var(axis=1).mean())
+    return C_all, C_random, C_cycle
+
+
 def plot_strategy_comparison(all_tensors, n_rep=5000):
-    """Empirical variance of benchmark score vs budget for three strategies."""
+    """Empirical variance of benchmark score vs budget for three strategies,
+    overlaid with exact theoretical predictions (dashed)."""
     models = [m for m in MODELS if m in all_tensors]
     K = K_TOT
-    max_budget = all_tensors[models[0]].shape[1] * K  # m_max * K
+    max_budget = all_tensors[models[0]].shape[1] * K
 
     budgets_k = list(range(K, max_budget + 1, K))
-    budgets_all = list(range(1, max_budget + 1))
 
     fig, axes = plt.subplots(
         1, max(len(models), 2), figsize=(FULL_W, 2.5), sharey=True
@@ -343,34 +361,36 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
     for idx, model in enumerate(models):
         ax = axes[idx]
         X = all_tensors[model]
+        n = X.shape[0]
+        C_all, C_random, C_cycle = compute_prediction_constants(X)
 
-        var_allj = []
+        var_allj, var_rand, var_cycle = [], [], []
         for B in budgets_k:
-            scores = subsample_benchmark(X, "all_judges", B, n_rep, np.random.default_rng(42))
-            var_allj.append(np.var(scores))
+            var_allj.append(np.var(
+                subsample_benchmark(X, "all_judges", B, n_rep, np.random.default_rng(42))
+            ))
+            var_rand.append(np.var(
+                subsample_benchmark(X, "random_1", B, n_rep, np.random.default_rng(42))
+            ))
+            var_cycle.append(np.var(
+                subsample_benchmark(X, "cycle", B, n_rep, np.random.default_rng(42))
+            ))
 
-        var_rand = []
-        for B in budgets_all:
-            scores = subsample_benchmark(X, "random_1", B, n_rep, np.random.default_rng(42))
-            var_rand.append(np.var(scores))
+        ax.semilogy(budgets_k, var_allj, "o", ms=3, color="C0",
+                     label=f"All {K} judges")
+        ax.semilogy(budgets_k, var_rand, "^", ms=3, color="C1",
+                     label="Random 1 judge")
+        ax.semilogy(budgets_k, var_cycle, "s", ms=3, color="C2",
+                     label=f"Cycle {K} judges")
 
-        var_cycle = []
-        for B in budgets_k:
-            scores = subsample_benchmark(X, "cycle", B, n_rep, np.random.default_rng(42))
-            var_cycle.append(np.var(scores))
-
-        ax.semilogy(
-            budgets_k, var_allj, "-o", ms=3, lw=1.2, label=f"All {K} judges/gen"
-        )
-        ax.semilogy(
-            budgets_all, var_rand, "-", lw=1.2, alpha=0.8, label="Random 1 judge/gen"
-        )
-        ax.semilogy(
-            budgets_k, var_cycle, "-s", ms=3, lw=1.2, label=f"Cycle {K} judges"
-        )
+        B_dense = np.linspace(K, max_budget, 200)
+        ax.semilogy(B_dense, C_all / (n * B_dense), "--", lw=1.0, color="C0")
+        ax.semilogy(B_dense, C_random / (n * B_dense), "--", lw=1.0, color="C1")
+        ax.semilogy(B_dense, C_cycle / (n * B_dense), "--", lw=1.0, color="C2")
 
         if idx == 0:
             ax.set_ylabel("Var(benchmark score)")
+            ax.plot([], [], "--", color="gray", lw=0.8, label="Theory")
         if idx == len(models) // 2:
             ax.set_xlabel("Budget per scenario")
         ax.set_title(MODEL_LABELS[model])
@@ -382,7 +402,7 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
         labels,
         loc="lower center",
         bbox_to_anchor=(0.5, 0.02),
-        ncol=3,
+        ncol=4,
         frameon=False,
         fontsize=7,
     )
@@ -416,11 +436,11 @@ def main():
         print(f"\nAnalyzing: {model}")
         md = data.get(model, {})
         if not md:
-            print(f"  SKIPPED — no data")
+            print("  SKIPPED — no data")
             continue
         X, qids = build_tensor(md)
         if X.shape[0] == 0:
-            print(f"  SKIPPED — no complete scenarios")
+            print("  SKIPPED — no complete scenarios")
             continue
 
         print(
@@ -433,9 +453,9 @@ def main():
         all_tensors[model] = X
 
         print(
-            f"  μ={comp['mu']:.4f}  σ²ε={comp['sig_eps']:.4f}  "
-            f"σ²β={comp['sig_beta']:.4f}  σ²(α+δ)={comp['sig_ad']:.4f}  "
-            f"σ²γ={comp['sig_gamma']:.4f}"
+            f"  \u03bc\u03b8={comp['mu']:.4f}  \u03c3\u00b2_D={comp['sig_ad']:.4f}  "
+            f"\u03c3\u00b2_\u03b8={comp['sig_beta']:.4f}  \u03c3\u00b2\u03b5={comp['sig_eps']:.4f}  "
+            f"\u03c3\u00b2\u03b3={comp['sig_gamma']:.4f}"
         )
 
     if not all_comp:
