@@ -265,7 +265,8 @@ def plot_judge_biases(all_comp):
         for jj, judge in enumerate(JUDGES):
             mat[jj, jm] = all_comp[model]["gamma"][judge]
 
-    fig, ax = plt.subplots(figsize=(COL_W, 2.6))
+    # Standard single-column size (3.5" width); larger figure => text appears smaller
+    fig, ax = plt.subplots(figsize=(3.5, 3.0))
     vmax = max(abs(mat.min()), abs(mat.max())) or 0.1
     im = ax.imshow(mat, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
     ax.set_xticks(range(len(models)))
