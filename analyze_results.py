@@ -233,6 +233,82 @@ def bootstrap_ci(X, B=2000, alpha=0.05):
 # ── Decomposition Table ─────────────────────────────────────────────────────
 
 
+def subsample_benchmark_single_judge(X, judge_idx, n_rep, rng):
+    """Subsample: 1 gen and 1 judge (fixed) per scenario. Return (n_rep,) benchmark scores.
+
+    Same operating point as contribution to Var: budget=1 eval per scenario, single judge.
+    """
+    n, m_max, _ = X.shape
+    gi = rng.choice(m_max, size=(n_rep, n), replace=True)  # (n_rep, n)
+    sampled = X[np.arange(n)[None, :], gi, judge_idx]  # (n_rep, n)
+    return sampled.mean(axis=1)  # (n_rep,)
+
+
+def compute_single_judge_table(all_tensors, n_rep, rng):
+    """For each (evaluated model, judge): mean score and 95% CI from subsample variance.
+
+    Operating point: all scenarios, 1 gen and 1 judge eval per scenario.
+    CI from variance of subsample benchmark (same idea as strategy Var at budget=1).
+    Returns: dict (model, judge) -> (mean, ci_half) where ci_half = 1.96 * SE.
+    """
+    models = [m for m in MODELS if m in all_tensors]
+    table = {}
+    for model in models:
+        X = all_tensors[model]
+        for judge_idx, judge in enumerate(JUDGES):
+            scores = subsample_benchmark_single_judge(X, judge_idx, n_rep, rng)
+            mean_score = float(scores.mean())
+            var_benchmark = float(scores.var(ddof=1))  # sample variance of subsample means
+            se = np.sqrt(var_benchmark)
+            ci_half = 1.96 * se
+            table[(model, judge)] = (mean_score, ci_half)
+    return table
+
+
+def print_single_judge_table(table, n_rep):
+    """Print and append table: mean ± 95% CI (evaluated model x judge)."""
+    models = sorted({m for (m, j) in table})
+    if not models or not JUDGES:
+        return
+
+    lines = []
+    lines.append("")
+    lines.append("=" * 92)
+    lines.append(
+        "MEAN SCORE ± 95% CI (all scenarios, 1 gen & 1 judge eval per scenario; CI from subsample Var)"
+    )
+    lines.append("=" * 92)
+    lines.append(f"  (n_rep = {n_rep} subsample replications per cell)")
+    lines.append("")
+    # Header: judge labels as columns
+    col_w = 22
+    header = f"{'Evaluated model':<22s}"
+    for judge in JUDGES:
+        header += f" | {JUDGE_LABELS[judge]:>{col_w - 4}s}"
+    lines.append(header)
+    lines.append("-" * 92)
+    for model in models:
+        row = f"{MODEL_LABELS[model]:<22s}"
+        for judge in JUDGES:
+            key = (model, judge)
+            if key not in table:
+                row += f" | {'—':>{col_w}s}"
+                continue
+            mean_score, ci_half = table[key]
+            cell = f"{mean_score:.4f} ± {ci_half:.4f}"
+            row += f" | {cell:>{col_w}s}"
+        lines.append(row)
+    lines.append("")
+    txt = "\n".join(lines)
+    print(txt)
+    summary_path = Path("results_summary.txt")
+    if summary_path.exists():
+        summary_path.write_text(summary_path.read_text() + "\n" + txt)
+    else:
+        summary_path.write_text(txt)
+    print("  Appended to results_summary.txt")
+
+
 def print_decomposition_table(all_comp, all_ci):
     """Print and save variance decomposition as a formatted table."""
     models = [m for m in MODELS if m in all_comp]
@@ -299,7 +375,7 @@ def plot_judge_biases(all_comp):
     vmax = max(abs(mat.min()), abs(mat.max())) or 0.1
     im = ax.imshow(mat, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
     ax.set_xticks(range(len(models)))
-    ax.set_xticklabels([MODEL_LABELS[m] for m in models], rotation=0)
+    ax.set_xticklabels([MODEL_LABELS[m] for m in models], rotation=45, ha="right")
     ax.set_yticks(range(len(JUDGES)))
     ax.set_yticklabels([JUDGE_LABELS[j] for j in JUDGES])
     ax.set_xlabel("Evaluated model")
@@ -496,6 +572,11 @@ def main():
         return
 
     print_decomposition_table(all_comp, all_ci)
+
+    rng = np.random.default_rng(42)
+    single_judge_table = compute_single_judge_table(all_tensors, n_rep, rng)
+    print_single_judge_table(single_judge_table, n_rep)
+
     plot_judge_biases(all_comp)
 
     print(f"\nRunning strategy comparison ({n_rep} reps per budget point)...")
