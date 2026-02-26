@@ -2,12 +2,10 @@
 """
 MT-Bench Variance Decomposition Experiment
 ==========================================
-Proper two-turn MT-Bench evaluation via OpenRouter.
-Follows the official FastChat/llm_judge protocol:
-  - Two-turn generation (conversation context preserved across turns)
-  - Per-turn judging with official single-v1 and single-v1-multi-turn prompts
-  - Answers saved in FastChat JSONL format
-  - Final MT-Bench score = average of turn 1 and turn 2 scores
+Two-turn MT-Bench generation and evaluation via OpenRouter.
+Cache layout:
+  - Generations: data/mt_bench/generations/{model_name}/{question_id}/{index}.json
+  - Evaluations: data/mt_bench/judgements/{model_name}/{question_id}/{index}/{judge_model}.json
 """
 
 import argparse
@@ -17,7 +15,6 @@ import os
 import re
 import sys
 import time
-import uuid
 from pathlib import Path
 
 import aiohttp
@@ -28,17 +25,17 @@ API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MODELS = {
-    "claude-haiku-4.5": "anthropic/claude-haiku-4.5",
+    "qwen-2.5-7b-instruct": "qwen/qwen-2.5-7b-instruct",
     "llama-3.3-70b-instruct": "meta-llama/llama-3.3-70b-instruct",
-    "gpt-5.2-chat": "openai/gpt-5.2-chat",
+    "gpt-5.2": "openai/gpt-5.2",
 }
 
 JUDGES = {
-    "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
+    "qwen-2.5-7b-instruct": "qwen/qwen-2.5-7b-instruct",
+    "llama-3.3-70b-instruct": "meta-llama/llama-3.3-70b-instruct",
     "gpt-5.2": "openai/gpt-5.2",
     "gemini-3-flash": "google/gemini-3-flash-preview",
-    "kimi-k2": "moonshotai/kimi-k2",
-    "llama-3.3-70b-instruct": "meta-llama/llama-3.3-70b-instruct",
+    "claude-sonnet-4.6": "anthropic/claude-sonnet-4.6",
 }
 
 NUM_GENERATIONS = 10
@@ -51,7 +48,8 @@ CONCURRENCY = 10
 MAX_RETRIES = 6
 
 DATA_DIR = Path("data")
-ANSWER_DIR = DATA_DIR / "mt_bench" / "model_answer"
+GENERATIONS_ROOT = DATA_DIR / "mt_bench" / "generations"
+JUDGEMENTS_ROOT = DATA_DIR / "mt_bench" / "judgements"
 
 # ── Official MT-Bench Judge Prompts (from FastChat judge_prompts.jsonl) ──────
 # https://github.com/lm-sys/FastChat/blob/main/fastchat/llm_judge/data/judge_prompts.jsonl
@@ -178,7 +176,116 @@ def load_json(path):
     if path.exists():
         with open(path) as f:
             return json.load(f)
-    return {}
+    return None
+
+
+def generation_cache_path(model_name, question_id, index):
+    """Path to generation cache file: .../generations/{model}/{qid}/{index}.json"""
+    return GENERATIONS_ROOT / model_name / str(question_id) / f"{index}.json"
+
+
+def evaluation_cache_path(model_name, question_id, index, judge_model):
+    """Path to evaluation cache file: .../judgements/{model}/{qid}/{index}/{judge}.json"""
+    return (
+        JUDGEMENTS_ROOT
+        / model_name
+        / str(question_id)
+        / str(index)
+        / f"{judge_model}.json"
+    )
+
+
+def load_generations_cache():
+    """Load all cached generations from disk into a dict keyed by 'model|qid|index'."""
+    cache = {}
+    if not GENERATIONS_ROOT.exists():
+        return cache
+    for model_dir in GENERATIONS_ROOT.iterdir():
+        if not model_dir.is_dir():
+            continue
+        model_name = model_dir.name
+        for qid_dir in model_dir.iterdir():
+            if not qid_dir.is_dir():
+                continue
+            try:
+                question_id = int(qid_dir.name)
+            except ValueError:
+                continue
+            for path in qid_dir.iterdir():
+                if path.is_file() and path.suffix == ".json":
+                    try:
+                        index = int(path.stem)
+                    except ValueError:
+                        continue
+                    data = load_json(path)
+                    if data is not None and "turns" in data:
+                        gkey = f"{model_name}|{question_id}|{index}"
+                        cache[gkey] = data["turns"]
+    return cache
+
+
+def save_generation(model_name, question_id, index, data):
+    """Save one generation to data/mt_bench/generations/{model}/{qid}/{index}.json"""
+    path = generation_cache_path(model_name, question_id, index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_judgments_cache():
+    """Load all cached judgments from disk. Returns dict keyed by 'model|qid|index|judge|t{1|2}'."""
+    cache = {}
+    if not JUDGEMENTS_ROOT.exists():
+        return cache
+    for model_dir in JUDGEMENTS_ROOT.iterdir():
+        if not model_dir.is_dir():
+            continue
+        model_name = model_dir.name
+        for qid_dir in model_dir.iterdir():
+            if not qid_dir.is_dir():
+                continue
+            try:
+                question_id = int(qid_dir.name)
+            except ValueError:
+                continue
+            for index_dir in qid_dir.iterdir():
+                if not index_dir.is_dir():
+                    continue
+                try:
+                    index = int(index_dir.name)
+                except ValueError:
+                    continue
+                for path in index_dir.iterdir():
+                    if path.is_file() and path.suffix == ".json":
+                        judge_model = path.stem
+                        data = load_json(path)
+                        if data is None:
+                            continue
+                        gkey_base = f"{model_name}|{question_id}|{index}|{judge_model}"
+                        for turn_name in ("turn1", "turn2"):
+                            t = data.get(turn_name)
+                            if isinstance(t, dict) and "score" in t:
+                                turn_num = "t2" if turn_name == "turn2" else "t1"
+                                cache[f"{gkey_base}|{turn_num}"] = {
+                                    "score": t["score"],
+                                    "reasoning": t.get("reasoning", ""),
+                                }
+    return cache
+
+
+def save_evaluation(
+    model_name, question_id, index, judge_model, turn1_data, turn2_data
+):
+    """Read existing file (if any), merge turn1/turn2, write. Either/both can be None."""
+    path = evaluation_cache_path(model_name, question_id, index, judge_model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_json(path) or {}
+    if turn1_data is not None:
+        existing["turn1"] = turn1_data
+    if turn2_data is not None:
+        existing["turn2"] = turn2_data
+    with open(path, "w") as f:
+        json.dump(existing, f, indent=2)
 
 
 # ── API ──────────────────────────────────────────────────────────────────────
@@ -229,7 +336,7 @@ async def api_call(session, sem, model, messages, temperature, max_tokens):
 
 
 async def run_generations(session, sem, questions, gen_cache):
-    """Generate two-turn conversations. Each entry is a list [turn1, turn2]."""
+    """Generate two-turn conversations. Each entry is a list [turn1, turn2]. Cache per file."""
     task_list = []
     for mname, mid in MODELS.items():
         for q in questions:
@@ -243,13 +350,14 @@ async def run_generations(session, sem, questions, gen_cache):
         print("  Generations: all cached")
         return
 
-    print(f"  Generations: {len(task_list)} conversations "
-          f"({len(task_list) * 2} API calls)")
+    print(
+        f"  Generations: {len(task_list)} conversations "
+        f"({len(task_list) * 2} API calls)"
+    )
     prog = Progress(len(task_list), "Gen")
     queue = asyncio.Queue()
     for t in task_list:
         queue.put_nowait(t)
-    save_counter = [0]
 
     async def worker():
         while True:
@@ -259,52 +367,32 @@ async def run_generations(session, sem, questions, gen_cache):
                 return
             try:
                 msgs = [{"role": "user", "content": q["turns"][0]}]
-                t1 = await api_call(session, sem, mid, msgs,
-                                    GEN_TEMPERATURE, GEN_MAX_TOKENS)
+                t1 = await api_call(
+                    session, sem, mid, msgs, GEN_TEMPERATURE, GEN_MAX_TOKENS
+                )
                 msgs.append({"role": "assistant", "content": t1})
                 msgs.append({"role": "user", "content": q["turns"][1]})
-                t2 = await api_call(session, sem, mid, msgs,
-                                    GEN_TEMPERATURE, GEN_MAX_TOKENS)
-                gen_cache[gkey] = [t1, t2]
+                t2 = await api_call(
+                    session, sem, mid, msgs, GEN_TEMPERATURE, GEN_MAX_TOKENS
+                )
+                turns = [t1, t2]
+                gen_cache[gkey] = turns
+                data = {
+                    "model_id": mname,
+                    "question_id": q["question_id"],
+                    "category": q.get("category"),
+                    "index": g,
+                    "turns": turns,
+                    "questions": q.get("turns"),
+                }
+                save_generation(mname, q["question_id"], g, data)
                 prog.tick(True)
             except Exception:
                 prog.tick(False)
-            save_counter[0] += 1
-            if save_counter[0] % 100 == 0:
-                save_json(gen_cache, DATA_DIR / "generations.json")
 
     workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY)]
     await asyncio.gather(*workers)
     prog.finish()
-    save_json(gen_cache, DATA_DIR / "generations.json")
-
-
-# ── Save Answers in FastChat Format ──────────────────────────────────────────
-
-
-def save_fastchat_answers(questions, gen_cache):
-    """Write per-model JSONL files matching FastChat's answer format."""
-    ANSWER_DIR.mkdir(parents=True, exist_ok=True)
-
-    for mname in MODELS:
-        answer_file = ANSWER_DIR / f"{mname}.jsonl"
-        with open(answer_file, "w") as fout:
-            for q in questions:
-                qid = q["question_id"]
-                choices = []
-                for g in range(NUM_GENERATIONS):
-                    gkey = f"{mname}|{qid}|{g}"
-                    turns = gen_cache.get(gkey, ["", ""])
-                    choices.append({"index": g, "turns": turns})
-                record = {
-                    "question_id": qid,
-                    "answer_id": str(uuid.uuid4()),
-                    "model_id": mname,
-                    "choices": choices,
-                    "tstamp": time.time(),
-                }
-                fout.write(json.dumps(record) + "\n")
-        print(f"  Saved {answer_file}")
 
 
 # ── Phase 2: Per-Turn Judging ────────────────────────────────────────────────
@@ -326,8 +414,9 @@ async def run_judgments(session, sem, questions, gen_cache, jdg_cache):
                         jkey = f"{mname}|{qid}|{g}|{jname}|t{turn_num}"
                         if jkey in jdg_cache:
                             continue
-                        task_list.append((mname, q, g, jname, jid,
-                                          turn_num, turns, jkey))
+                        task_list.append(
+                            (mname, q, g, jname, jid, turn_num, turns, jkey)
+                        )
 
     if not task_list:
         print("  Judgments: all cached")
@@ -338,58 +427,69 @@ async def run_judgments(session, sem, questions, gen_cache, jdg_cache):
     queue = asyncio.Queue()
     for t in task_list:
         queue.put_nowait(t)
-    save_counter = [0]
 
     async def worker():
         while True:
             try:
-                mname, q, g, jname, jid, turn_num, turns, jkey = \
-                    queue.get_nowait()
+                mname, q, g, jname, jid, turn_num, turns, jkey = queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
             try:
                 if turn_num == 1:
                     pcfg = JUDGE_PROMPTS["single-v1"]
                     user_msg = pcfg["prompt_template"].format(
-                        question=q["turns"][0], answer=turns[0])
+                        question=q["turns"][0], answer=turns[0]
+                    )
                 else:
                     pcfg = JUDGE_PROMPTS["single-v1-multi-turn"]
                     user_msg = pcfg["prompt_template"].format(
-                        question_1=q["turns"][0], answer_1=turns[0],
-                        question_2=q["turns"][1], answer_2=turns[1])
+                        question_1=q["turns"][0],
+                        answer_1=turns[0],
+                        question_2=q["turns"][1],
+                        answer_2=turns[1],
+                    )
 
                 msgs = [
                     {"role": "system", "content": pcfg["system_prompt"]},
                     {"role": "user", "content": user_msg},
                 ]
-                text = await api_call(session, sem, jid, msgs,
-                                      JUDGE_TEMPERATURE, JUDGE_MAX_TOKENS)
+                text = await api_call(
+                    session, sem, jid, msgs, JUDGE_TEMPERATURE, JUDGE_MAX_TOKENS
+                )
                 score = extract_score(text)
                 if score is None:
                     msgs += [
                         {"role": "assistant", "content": text},
-                        {"role": "user",
-                         "content": 'Please provide your rating as "[[X]]".'},
+                        {
+                            "role": "user",
+                            "content": 'Please provide your rating as "[[X]]".',
+                        },
                     ]
-                    text2 = await api_call(session, sem, jid, msgs,
-                                           JUDGE_TEMPERATURE, JUDGE_MAX_TOKENS)
+                    text2 = await api_call(
+                        session, sem, jid, msgs, JUDGE_TEMPERATURE, JUDGE_MAX_TOKENS
+                    )
                     score = extract_score(text2)
                     text = text + "\n" + text2
                 if score is not None:
                     jdg_cache[jkey] = {"score": score, "reasoning": text}
+                    turn_data = {"score": score, "reasoning": text}
+                    save_evaluation(
+                        mname,
+                        q["question_id"],
+                        g,
+                        jname,
+                        turn1_data=turn_data if turn_num == 1 else None,
+                        turn2_data=turn_data if turn_num == 2 else None,
+                    )
                     prog.tick(True)
                 else:
                     prog.tick(False)
             except Exception:
                 prog.tick(False)
-            save_counter[0] += 1
-            if save_counter[0] % 100 == 0:
-                save_json(jdg_cache, DATA_DIR / "judgments.json")
 
     workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY)]
     await asyncio.gather(*workers)
     prog.finish()
-    save_json(jdg_cache, DATA_DIR / "judgments.json")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -453,8 +553,8 @@ async def main():
         f"= ~{n_gen_calls + n_jdg_calls} total"
     )
 
-    gen_cache = load_json(DATA_DIR / "generations.json")
-    jdg_cache = load_json(DATA_DIR / "judgments.json")
+    gen_cache = load_generations_cache()
+    jdg_cache = load_judgments_cache()
     print(f"Cache: {len(gen_cache)} generations, {len(jdg_cache)} judgments")
 
     conn = aiohttp.TCPConnector(limit=CONCURRENCY + 5)
@@ -463,9 +563,6 @@ async def main():
 
         print("\n=== Phase 1: Two-Turn Generations ===")
         await run_generations(session, sem, questions, gen_cache)
-
-        print("\n=== Saving answers in FastChat format ===")
-        save_fastchat_answers(questions, gen_cache)
 
         print("\n=== Phase 2: Judge Evaluations (both turns) ===")
         await run_judgments(session, sem, questions, gen_cache, jdg_cache)
@@ -477,7 +574,6 @@ async def main():
         for q in questions:
             qid = q["question_id"]
             for g in range(NUM_GENERATIONS):
-                gkey = f"{mname}|{qid}|{g}"
                 for jname in JUDGES:
                     jk1 = f"{mname}|{qid}|{g}|{jname}|t1"
                     jk2 = f"{mname}|{qid}|{g}|{jname}|t2"

@@ -8,3 +8,5 @@ main.tex
 references.bib
 acl.sty
 acl_natbib.bst
+
+*.tar.gz

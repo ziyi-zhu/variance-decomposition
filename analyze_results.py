@@ -10,6 +10,8 @@ import argparse
 import json
 from pathlib import Path
 
+from run_experiment import JUDGES as _JUDGES_DICT, MODELS as _MODELS_DICT
+
 import matplotlib
 import numpy as np
 
@@ -41,84 +43,110 @@ plt.rcParams.update(
 COL_W = 3.25
 FULL_W = 6.75
 
-MODELS = ["claude-haiku-4.5", "llama-3.3-70b-instruct", "gpt-5.2-chat"]
+# ── Models and judges: use current config from run_experiment ─────────────────
+MODELS = list(_MODELS_DICT.keys())
+JUDGES = list(_JUDGES_DICT.keys())
+
 MODEL_LABELS = {
-    "claude-haiku-4.5": "Haiku 4.5",
-    "llama-3.3-70b-instruct": "Llama 3.3-70B",
-    "gpt-5.2-chat": "GPT-5.2",
+    "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
+    "llama-3.3-70b-instruct": "Llama 3.3 70B",
+    "gpt-5.2": "GPT-5.2",
 }
-JUDGES = [
-    "claude-sonnet-4.5",
-    "gpt-5.2",
-    "gemini-3-flash",
-    "kimi-k2",
-    "llama-3.3-70b-instruct",
-]
 JUDGE_LABELS = {
-    "claude-sonnet-4.5": "Sonnet 4.5",
+    "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
+    "llama-3.3-70b-instruct": "Llama 3.3 70B",
     "gpt-5.2": "GPT-5.2",
     "gemini-3-flash": "Gemini 3 Flash",
-    "kimi-k2": "Kimi K2",
-    "llama-3.3-70b-instruct": "Llama 3.3-70B",
+    "claude-sonnet-4.6": "Claude Sonnet 4.6",
 }
+# Fallback: use key as label for any model/judge not in LABELS
+for m in MODELS:
+    if m not in MODEL_LABELS:
+        MODEL_LABELS[m] = m
+for j in JUDGES:
+    if j not in JUDGE_LABELS:
+        JUDGE_LABELS[j] = j
+
 K_TOT = len(JUDGES)
 
 DATA_DIR = Path("data")
 PLOT_DIR = Path("plots")
+JUDGEMENTS_ROOT = DATA_DIR / "mt_bench" / "judgements"
 
 # ── Data Loading ─────────────────────────────────────────────────────────────
 
 
-def load_data():
-    """Load from checkpoint files."""
-    jdg_path = DATA_DIR / "judgments.json"
-    all_path = DATA_DIR / "all_results.json"
+def _load_json(path):
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    return None
 
-    if jdg_path.exists():
-        with open(jdg_path) as f:
-            jdg_cache = json.load(f)
 
-        turn_scores = {}
-        legacy_data = {}
-
-        for key, val in jdg_cache.items():
-            parts = key.split("|")
-            score = val.get("score") if isinstance(val, dict) else val
-            if score is None:
+def load_data_from_cache():
+    """Load from new cache: data/mt_bench/judgements/{model}/{qid}/{index}/{judge}.json"""
+    data = {}
+    if not JUDGEMENTS_ROOT.exists():
+        return data
+    for model_dir in JUDGEMENTS_ROOT.iterdir():
+        if not model_dir.is_dir():
+            continue
+        model_name = model_dir.name
+        for qid_dir in model_dir.iterdir():
+            if not qid_dir.is_dir():
                 continue
-
-            if len(parts) == 5:
-                model, qid_str, gen_str, judge, turn_key = parts
-                base = (model, int(qid_str), int(gen_str), judge)
-                turn_scores.setdefault(base, {})[turn_key] = score
-            elif len(parts) == 4:
-                model, qid_str, gen_str, judge = parts
-                legacy_data.setdefault(model, {}).setdefault(
-                    int(qid_str), {}
-                ).setdefault(int(gen_str), {})[judge] = score
-
-        if turn_scores:
-            data = {}
-            for (model, qid, gen_idx, judge), turns in turn_scores.items():
-                s1, s2 = turns.get("t1"), turns.get("t2")
-                if s1 is not None and s2 is not None:
-                    avg = (s1 + s2) / 2.0
-                elif s1 is not None:
-                    avg = s1
-                elif s2 is not None:
-                    avg = s2
-                else:
+            try:
+                question_id = int(qid_dir.name)
+            except ValueError:
+                continue
+            for index_dir in qid_dir.iterdir():
+                if not index_dir.is_dir():
                     continue
-                data.setdefault(model, {}).setdefault(qid, {}).setdefault(gen_idx, {})[
-                    judge
-                ] = avg
-            return data
-        return legacy_data
+                try:
+                    index = int(index_dir.name)
+                except ValueError:
+                    continue
+                for path in index_dir.iterdir():
+                    if path.is_file() and path.suffix == ".json":
+                        judge_name = path.stem
+                        obj = _load_json(path)
+                        if obj is None:
+                            continue
+                        t1 = (
+                            obj.get("turn1")
+                            if isinstance(obj.get("turn1"), dict)
+                            else None
+                        )
+                        t2 = (
+                            obj.get("turn2")
+                            if isinstance(obj.get("turn2"), dict)
+                            else None
+                        )
+                        s1 = t1.get("score") if t1 else None
+                        s2 = t2.get("score") if t2 else None
+                        if s1 is not None and s2 is not None:
+                            avg = (s1 + s2) / 2.0
+                        elif s1 is not None:
+                            avg = s1
+                        elif s2 is not None:
+                            avg = s2
+                        else:
+                            continue
+                        data.setdefault(model_name, {}).setdefault(
+                            question_id, {}
+                        ).setdefault(index, {})[judge_name] = avg
+    return data
 
+
+def load_data():
+    """Load from new cache (judgements/) or fallback to all_results.json."""
+    data = load_data_from_cache()
+    if data:
+        return data
+    all_path = DATA_DIR / "all_results.json"
     if all_path.exists():
         with open(all_path) as f:
             records = json.load(f)
-        data = {}
         for r in records:
             if r["score"] is None:
                 continue
@@ -126,8 +154,9 @@ def load_data():
                 r["gen_idx"], {}
             )[r["judge"]] = r["score"]
         return data
-
-    raise FileNotFoundError(f"No data files found. Expected {jdg_path} or {all_path}")
+    raise FileNotFoundError(
+        f"No data found. Expected cache under {JUDGEMENTS_ROOT} or {all_path}"
+    )
 
 
 def build_tensor(model_data, m_target=10):
@@ -353,9 +382,7 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
 
     budgets_k = list(range(K, max_budget + 1, K))
 
-    fig, axes = plt.subplots(
-        1, max(len(models), 2), figsize=(FULL_W, 2.5), sharey=True
-    )
+    fig, axes = plt.subplots(1, max(len(models), 2), figsize=(FULL_W, 2.5), sharey=True)
     if not isinstance(axes, np.ndarray):
         axes = [axes]
 
@@ -367,22 +394,31 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
 
         var_allj, var_rand, var_cycle = [], [], []
         for B in budgets_k:
-            var_allj.append(np.var(
-                subsample_benchmark(X, "all_judges", B, n_rep, np.random.default_rng(42))
-            ))
-            var_rand.append(np.var(
-                subsample_benchmark(X, "random_1", B, n_rep, np.random.default_rng(42))
-            ))
-            var_cycle.append(np.var(
-                subsample_benchmark(X, "cycle", B, n_rep, np.random.default_rng(42))
-            ))
+            var_allj.append(
+                np.var(
+                    subsample_benchmark(
+                        X, "all_judges", B, n_rep, np.random.default_rng(42)
+                    )
+                )
+            )
+            var_rand.append(
+                np.var(
+                    subsample_benchmark(
+                        X, "random_1", B, n_rep, np.random.default_rng(42)
+                    )
+                )
+            )
+            var_cycle.append(
+                np.var(
+                    subsample_benchmark(X, "cycle", B, n_rep, np.random.default_rng(42))
+                )
+            )
 
-        ax.semilogy(budgets_k, var_allj, "o", ms=3, color="C0",
-                     label=f"All {K} judges")
-        ax.semilogy(budgets_k, var_rand, "^", ms=3, color="C1",
-                     label="Random 1 judge")
-        ax.semilogy(budgets_k, var_cycle, "s", ms=3, color="C2",
-                     label=f"Cycle {K} judges")
+        ax.semilogy(budgets_k, var_allj, "o", ms=3, color="C0", label=f"All {K} judges")
+        ax.semilogy(budgets_k, var_rand, "^", ms=3, color="C1", label="Random 1 judge")
+        ax.semilogy(
+            budgets_k, var_cycle, "s", ms=3, color="C2", label=f"Cycle {K} judges"
+        )
 
         B_dense = np.linspace(K, max_budget, 200)
         ax.semilogy(B_dense, C_all / (n * B_dense), "--", lw=1.0, color="C0")
@@ -419,9 +455,7 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
 
 def main():
     p = argparse.ArgumentParser(description="Variance decomposition analysis")
-    p.add_argument(
-        "--quick", action="store_true", help="Fewer reps for fast check"
-    )
+    p.add_argument("--quick", action="store_true", help="Fewer reps for fast check")
     args = p.parse_args()
 
     PLOT_DIR.mkdir(exist_ok=True)
@@ -444,9 +478,7 @@ def main():
             print("  SKIPPED — no complete scenarios")
             continue
 
-        print(
-            f"  Tensor: {X.shape} (n={X.shape[0]}, m={X.shape[1]}, K={X.shape[2]})"
-        )
+        print(f"  Tensor: {X.shape} (n={X.shape[0]}, m={X.shape[1]}, K={X.shape[2]})")
 
         comp = estimate_components(X)
         all_comp[model] = comp

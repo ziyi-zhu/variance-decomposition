@@ -9,6 +9,8 @@ Produces:
 import json
 from pathlib import Path
 
+from run_experiment import JUDGES as _JUDGES_DICT, MODELS as _MODELS_DICT
+
 import matplotlib
 import numpy as np
 from scipy import stats
@@ -39,55 +41,82 @@ plt.rcParams.update(
 COL_W = 3.25
 FULL_W = 6.75
 
-MODELS = ["claude-haiku-4.5", "llama-3.3-70b-instruct", "gpt-5.2-chat"]
+MODELS = list(_MODELS_DICT.keys())
+JUDGES = list(_JUDGES_DICT.keys())
+
 MODEL_LABELS = {
-    "claude-haiku-4.5": "Haiku 4.5",
-    "llama-3.3-70b-instruct": "Llama 3.3-70B",
-    "gpt-5.2-chat": "GPT-5.2",
+    "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
+    "llama-3.3-70b-instruct": "Llama 3.3 70B",
+    "gpt-5.2": "GPT-5.2",
 }
-JUDGES = [
-    "claude-sonnet-4.5",
-    "gpt-5.2",
-    "gemini-3-flash",
-    "kimi-k2",
-    "llama-3.3-70b-instruct",
-]
 JUDGE_LABELS = {
-    "claude-sonnet-4.5": "Sonnet 4.5",
+    "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
+    "llama-3.3-70b-instruct": "Llama 3.3 70B",
     "gpt-5.2": "GPT-5.2",
     "gemini-3-flash": "Gemini 3 Flash",
-    "kimi-k2": "Kimi K2",
-    "llama-3.3-70b-instruct": "Llama 3.3-70B",
+    "claude-sonnet-4.6": "Claude Sonnet 4.6",
 }
+for m in MODELS:
+    if m not in MODEL_LABELS:
+        MODEL_LABELS[m] = m
+for j in JUDGES:
+    if j not in JUDGE_LABELS:
+        JUDGE_LABELS[j] = j
+
 K_TOT = len(JUDGES)
 PLOT_DIR = Path("plots")
+DATA_DIR = Path("data")
+JUDGEMENTS_ROOT = DATA_DIR / "mt_bench" / "judgements"
+
+
+def _load_json(path):
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    return None
 
 
 def load_tensor(model, m_target=10):
-    with open("data/judgments.json") as f:
-        jdg_cache = json.load(f)
-
-    turn_scores = {}
-    for key, val in jdg_cache.items():
-        parts = key.split("|")
-        score = val.get("score") if isinstance(val, dict) else val
-        if score is None:
-            continue
-        if len(parts) == 5:
-            m, qid_str, gen_str, judge, turn_key = parts
-            if m != model:
-                continue
-            base = (int(qid_str), int(gen_str), judge)
-            turn_scores.setdefault(base, {})[turn_key] = score
-
+    """Load (n, m, K) tensor from new cache: data/mt_bench/judgements/{model}/{qid}/{index}/{judge}.json"""
     data = {}
-    for (qid, gen_idx, judge), turns in turn_scores.items():
-        s1, s2 = turns.get("t1"), turns.get("t2")
-        if s1 is not None and s2 is not None:
-            avg = (s1 + s2) / 2.0
-        else:
+    if not JUDGEMENTS_ROOT.exists():
+        return np.zeros((0, m_target, K_TOT))
+
+    model_dir = JUDGEMENTS_ROOT / model
+    if not model_dir.is_dir():
+        return np.zeros((0, m_target, K_TOT))
+
+    for qid_dir in model_dir.iterdir():
+        if not qid_dir.is_dir():
             continue
-        data.setdefault(qid, {}).setdefault(gen_idx, {})[judge] = avg
+        try:
+            question_id = int(qid_dir.name)
+        except ValueError:
+            continue
+        for index_dir in qid_dir.iterdir():
+            if not index_dir.is_dir():
+                continue
+            try:
+                index = int(index_dir.name)
+            except ValueError:
+                continue
+            for path in index_dir.iterdir():
+                if path.is_file() and path.suffix == ".json":
+                    judge_name = path.stem
+                    obj = _load_json(path)
+                    if obj is None:
+                        continue
+                    t1 = obj.get("turn1") if isinstance(obj.get("turn1"), dict) else None
+                    t2 = obj.get("turn2") if isinstance(obj.get("turn2"), dict) else None
+                    s1 = t1.get("score") if t1 else None
+                    s2 = t2.get("score") if t2 else None
+                    if s1 is not None and s2 is not None:
+                        avg = (s1 + s2) / 2.0
+                    else:
+                        continue
+                    data.setdefault(question_id, {}).setdefault(index, {})[
+                        judge_name
+                    ] = avg
 
     complete = [
         qid
