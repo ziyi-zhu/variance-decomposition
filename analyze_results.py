@@ -530,13 +530,22 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
 
 
 def main():
+    global JUDGEMENTS_ROOT
     p = argparse.ArgumentParser(description="Variance decomposition analysis")
     p.add_argument("--quick", action="store_true", help="Fewer reps for fast check")
+    p.add_argument(
+        "--benchmark",
+        default="mt_bench",
+        choices=["mt_bench", "mind_eval"],
+        help="Data source: mt_bench (default) or mind_eval (data/mind_eval/judgements)",
+    )
     args = p.parse_args()
+
+    JUDGEMENTS_ROOT = DATA_DIR / args.benchmark / "judgements"
 
     PLOT_DIR.mkdir(exist_ok=True)
 
-    print("Loading data...")
+    print(f"Loading data from {JUDGEMENTS_ROOT}...")
     data = load_data()
 
     all_comp, all_ci, all_tensors = {}, {}, {}

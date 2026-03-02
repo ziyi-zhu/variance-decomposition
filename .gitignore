@@ -10,3 +10,4 @@ acl.sty
 acl_natbib.bst
 
 *.tar.gz
+.DS_Store
