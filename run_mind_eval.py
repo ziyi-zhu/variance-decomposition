@@ -29,12 +29,15 @@ GENERATIONS_ROOT = DATA_DIR / "mind_eval" / "generations"
 JUDGEMENTS_ROOT = DATA_DIR / "mind_eval" / "judgements"
 
 # Mind-eval config (match mind-eval/run_benchmark.sh: data/profiles.jsonl, custom clinician, v0_2 member, 10 turns)
+# We evaluate the clinician; member (client) is fixed (see run_benchmark.sh: clinician=$1, member=fixed).
 NUM_GENERATIONS = 5
 N_TURNS = 10
 PROFILES_PATH = DATA_DIR / "profiles.jsonl"  # same as run_benchmark.sh --profiles_path data/profiles.jsonl
 CLINICIAN_TEMPLATE_VERSION = "custom"
 MEMBER_TEMPLATE_VERSION = "v0_2"
 JUDGE_TEMPLATE_VERSION = "v0_1"
+# Fixed model for simulated member (client); clinician varies per MODELS (evaluated).
+MEMBER_MODEL_KEY = "qwen-2.5-7b-instruct"
 MAX_WORKERS_INTERACTION = 4
 MAX_WORKERS_JUDGE = 8
 
@@ -74,7 +77,6 @@ def load_profiles():
 
 def run_one_interaction(
     profile_dict,
-    member_model_key,
     clinician_engine,
     member_engine,
     clinician_template,
@@ -173,9 +175,9 @@ def main():
     else:
         print(f"  Loaded {len(profiles)} profiles", flush=True)
 
-    clinician_key = list(JUDGES.keys())[0]
-    clinician_engine = InferenceEngine(
-        api_params=openrouter_api_params(clinician_key, is_judge=True)
+    # Fixed member (client) engine; clinician varies per model under evaluation.
+    member_engine = InferenceEngine(
+        api_params=openrouter_api_params(MEMBER_MODEL_KEY, is_judge=False)
     )
     clinician_template = INTERACTION_CLINICIAN_VERSION_DICT[CLINICIAN_TEMPLATE_VERSION]
     member_template = INTERACTION_MEMBER_VERSION_DICT[MEMBER_TEMPLATE_VERSION]
@@ -197,7 +199,7 @@ def main():
             print(f"  {len(gen_tasks)} conversations to run", flush=True)
         pbar = tqdm(gen_tasks, desc="  Generations", unit="conv")
         current_model = None
-        member_engine = None
+        clinician_engine = None
         for model_key, profile_id, g in pbar:
             pbar.set_postfix_str(f"{model_key} p{profile_id} g{g}")
             path = generation_cache_path(model_key, profile_id, g)
@@ -205,14 +207,13 @@ def main():
                 continue
             if model_key != current_model:
                 current_model = model_key
-                member_engine = InferenceEngine(
+                clinician_engine = InferenceEngine(
                     api_params=openrouter_api_params(model_key, is_judge=False)
                 )
             profile_dict = profiles[profile_id]
             try:
                 interaction = run_one_interaction(
                     profile_dict,
-                    model_key,
                     clinician_engine,
                     member_engine,
                     clinician_template,
