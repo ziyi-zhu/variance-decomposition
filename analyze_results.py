@@ -72,6 +72,7 @@ K_TOT = len(JUDGES)
 DATA_DIR = Path("data")
 PLOT_DIR = Path("plots")
 JUDGEMENTS_ROOT = DATA_DIR / "mt_bench" / "judgements"
+BENCHMARK = "mt_bench"  # set in main(); "mt_bench" | "mind_eval"
 
 # ── Data Loading ─────────────────────────────────────────────────────────────
 
@@ -83,8 +84,39 @@ def _load_json(path):
     return None
 
 
+def _score_from_judgment_obj(obj, benchmark: str):
+    """Extract single score from judgment JSON. mt_bench: turn1/turn2; mind_eval: top-level score (fallback: turn1/turn2)."""
+    if benchmark == "mind_eval":
+        s = obj.get("score")
+        if s is not None:
+            return float(s)
+        # Legacy: mind_eval used to save turn1/turn2; fall back to same logic
+    # mt_bench, or mind_eval legacy: turn1 and turn2
+    t1 = (
+        obj.get("turn1")
+        if isinstance(obj.get("turn1"), dict)
+        else None
+    )
+    t2 = (
+        obj.get("turn2")
+        if isinstance(obj.get("turn2"), dict)
+        else None
+    )
+    s1 = t1.get("score") if t1 else None
+    s2 = t2.get("score") if t2 else None
+    if s1 is not None and s2 is not None:
+        return (s1 + s2) / 2.0
+    if s1 is not None:
+        return s1
+    if s2 is not None:
+        return s2
+    return None
+
+
 def load_data_from_cache():
-    """Load from new cache: data/mt_bench/judgements/{model}/{qid}/{index}/{judge}.json"""
+    """Load from cache: .../judgements/{model}/{qid}/{index}/{judge}.json
+    Format depends on BENCHMARK: mt_bench uses turn1/turn2; mind_eval uses top-level score.
+    """
     data = {}
     if not JUDGEMENTS_ROOT.exists():
         return data
@@ -112,25 +144,8 @@ def load_data_from_cache():
                         obj = _load_json(path)
                         if obj is None:
                             continue
-                        t1 = (
-                            obj.get("turn1")
-                            if isinstance(obj.get("turn1"), dict)
-                            else None
-                        )
-                        t2 = (
-                            obj.get("turn2")
-                            if isinstance(obj.get("turn2"), dict)
-                            else None
-                        )
-                        s1 = t1.get("score") if t1 else None
-                        s2 = t2.get("score") if t2 else None
-                        if s1 is not None and s2 is not None:
-                            avg = (s1 + s2) / 2.0
-                        elif s1 is not None:
-                            avg = s1
-                        elif s2 is not None:
-                            avg = s2
-                        else:
+                        avg = _score_from_judgment_obj(obj, BENCHMARK)
+                        if avg is None:
                             continue
                         data.setdefault(model_name, {}).setdefault(
                             question_id, {}
@@ -530,7 +545,7 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
 
 
 def main():
-    global JUDGEMENTS_ROOT
+    global JUDGEMENTS_ROOT, BENCHMARK
     p = argparse.ArgumentParser(description="Variance decomposition analysis")
     p.add_argument("--quick", action="store_true", help="Fewer reps for fast check")
     p.add_argument(
@@ -541,6 +556,7 @@ def main():
     )
     args = p.parse_args()
 
+    BENCHMARK = args.benchmark
     JUDGEMENTS_ROOT = DATA_DIR / args.benchmark / "judgements"
 
     PLOT_DIR.mkdir(exist_ok=True)

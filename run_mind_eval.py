@@ -20,6 +20,7 @@ sys.path.insert(0, str(_REPO_ROOT / "mind-eval"))
 
 # Suppress litellm "Provider List" warning (non-critical) before any mind-eval import
 import litellm
+
 litellm.suppress_debug_info = True
 
 from run_experiment import DATA_DIR, JUDGES, MODELS
@@ -32,14 +33,17 @@ JUDGEMENTS_ROOT = DATA_DIR / "mind_eval" / "judgements"
 # We evaluate the clinician; member (client) is fixed (see run_benchmark.sh: clinician=$1, member=fixed).
 NUM_GENERATIONS = 5
 N_TURNS = 10
-PROFILES_PATH = DATA_DIR / "profiles.jsonl"  # same as run_benchmark.sh --profiles_path data/profiles.jsonl
+PROFILES_PATH = (
+    DATA_DIR / "profiles.jsonl"
+)  # same as run_benchmark.sh --profiles_path data/profiles.jsonl
 CLINICIAN_TEMPLATE_VERSION = "custom"
 MEMBER_TEMPLATE_VERSION = "v0_2"
 JUDGE_TEMPLATE_VERSION = "v0_1"
 # Fixed model for simulated member (client); clinician varies per MODELS (evaluated).
-MEMBER_MODEL_KEY = "qwen-2.5-7b-instruct"
-MAX_WORKERS_INTERACTION = 4
-MAX_WORKERS_JUDGE = 8
+# OpenRouter model ID (no "openrouter/" prefix).
+MEMBER_MODEL_OPENROUTER_ID = "anthropic/claude-haiku-4.5"
+MAX_WORKERS_INTERACTION = 5
+MAX_WORKERS_JUDGE = 5
 
 
 def openrouter_api_params(model_key: str, is_judge: bool = False) -> dict:
@@ -64,13 +68,20 @@ def load_profiles():
     """Load profiles from data/profiles.jsonl (same as run_benchmark.sh --profiles_path data/profiles.jsonl)."""
     if not PROFILES_PATH.exists():
         print(f"Error: profiles not found at {PROFILES_PATH}", flush=True)
-        print("  Use data/profiles.jsonl from mind-eval (same as run_benchmark.sh).", flush=True)
+        print(
+            "  Use data/profiles.jsonl from mind-eval (same as run_benchmark.sh).",
+            flush=True,
+        )
         sys.exit(1)
     ensure_mind_eval_path()
     from mindeval.utils import load_jsonl
+
     rows = load_jsonl(str(PROFILES_PATH))
     return [
-        {"member_attributes": r["member_attributes"], "member_narrative": r["member_narrative"]}
+        {
+            "member_attributes": r["member_attributes"],
+            "member_narrative": r["member_narrative"],
+        }
         for r in rows
     ]
 
@@ -171,13 +182,19 @@ def main():
     profiles = load_profiles()
     if args.profiles is not None:
         profiles = profiles[: args.profiles]
-        print(f"  Using first {len(profiles)} profiles (--profiles={args.profiles})", flush=True)
+        print(
+            f"  Using first {len(profiles)} profiles (--profiles={args.profiles})",
+            flush=True,
+        )
     else:
         print(f"  Loaded {len(profiles)} profiles", flush=True)
 
     # Fixed member (client) engine; clinician varies per model under evaluation.
     member_engine = InferenceEngine(
-        api_params=openrouter_api_params(MEMBER_MODEL_KEY, is_judge=False)
+        api_params={
+            "model": f"openrouter/{MEMBER_MODEL_OPENROUTER_ID}",
+            "max_tokens": 2048,
+        }
     )
     clinician_template = INTERACTION_CLINICIAN_VERSION_DICT[CLINICIAN_TEMPLATE_VERSION]
     member_template = INTERACTION_MEMBER_VERSION_DICT[MEMBER_TEMPLATE_VERSION]
@@ -282,32 +299,46 @@ def main():
                 parsed = parse_judge_scores(unparsed)[0]
                 overall = parsed.get("Overall score") or parsed.get("Average score")
                 if overall is None:
-                    overall = (
-                        sum(
-                            parsed.get(c, 3)
-                            for c in [
-                                "Clinical Accuracy & Competence",
-                                "Ethical & Professional Conduct",
-                                "Assessment & Response",
-                                "Therapeutic Relationship & Alliance",
-                                "AI-Specific Communication Quality",
-                            ]
-                        )
-                        / 5.0
-                    )
-                turn_data = {"score": float(overall), "reasoning": unparsed or ""}
+                    criteria = [
+                        "Clinical Accuracy & Competence",
+                        "Ethical & Professional Conduct",
+                        "Assessment & Response",
+                        "Therapeutic Relationship & Alliance",
+                        "AI-Specific Communication Quality",
+                    ]
+                    overall = sum(parsed.get(c, 3) for c in criteria) / len(criteria)
+                # Full result: overall score, all dimension scores, raw reasoning
+                out_obj = {
+                    "score": float(overall),
+                    "reasoning": unparsed or "",
+                    "scores": {
+                        "Clinical Accuracy & Competence": parsed.get(
+                            "Clinical Accuracy & Competence", 3
+                        ),
+                        "Ethical & Professional Conduct": parsed.get(
+                            "Ethical & Professional Conduct", 3
+                        ),
+                        "Assessment & Response": parsed.get(
+                            "Assessment & Response", 3
+                        ),
+                        "Therapeutic Relationship & Alliance": parsed.get(
+                            "Therapeutic Relationship & Alliance", 3
+                        ),
+                        "AI-Specific Communication Quality": parsed.get(
+                            "AI-Specific Communication Quality", 3
+                        ),
+                    },
+                }
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(out_path, "w") as f:
-                    json.dump({"turn1": turn_data, "turn2": turn_data}, f, indent=2)
+                    json.dump(out_obj, f, indent=2)
             except Exception as e:
                 print(f"  Error judge {judge_key} {model_key} p{profile_id} g{g}: {e}")
         print("  Judgments done.", flush=True)
     else:
         print("\n=== Judgments (skipped) ===")
 
-    print(
-        "\nDone. Cache: data/mind_eval/generations and data/mind_eval/judgements"
-    )
+    print("\nDone. Cache: data/mind_eval/generations and data/mind_eval/judgements")
     print("Run analysis: python analyze_results.py --benchmark mind_eval")
 
 
