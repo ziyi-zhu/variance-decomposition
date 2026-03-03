@@ -71,8 +71,9 @@ K_TOT = len(JUDGES)
 
 DATA_DIR = Path("data")
 PLOT_DIR = Path("plots")
+ALL_BENCHMARKS = ["mt_bench", "mind_eval", "theagentcompany"]
 JUDGEMENTS_ROOT = DATA_DIR / "mt_bench" / "judgements"
-BENCHMARK = "mt_bench"  # set in main(); "mt_bench" | "mind_eval"
+BENCHMARK = "mt_bench"
 
 # ── Data Loading ─────────────────────────────────────────────────────────────
 
@@ -85,8 +86,8 @@ def _load_json(path):
 
 
 def _score_from_judgment_obj(obj, benchmark: str):
-    """Extract single score from judgment JSON. mt_bench: turn1/turn2; mind_eval: top-level score (fallback: turn1/turn2)."""
-    if benchmark == "mind_eval":
+    """Extract single score from judgment JSON. mt_bench: turn1/turn2; mind_eval/theagentcompany: top-level score (fallback: turn1/turn2)."""
+    if benchmark in ("mind_eval", "theagentcompany"):
         s = obj.get("score")
         if s is not None:
             return float(s)
@@ -174,8 +175,23 @@ def load_data():
     )
 
 
-def build_tensor(model_data, m_target=10):
-    """Build balanced (n, m, K) tensor; drop incomplete scenarios."""
+def build_tensor(model_data, m_target=None):
+    """Build balanced (n, m, K) tensor; drop incomplete scenarios.
+
+    If m_target is None, auto-detect the largest m for which at least one
+    scenario is complete (i.e. has generations 0..m-1 each judged by all judges).
+    """
+    if m_target is None:
+        m_candidates = set()
+        for qid, gens in model_data.items():
+            for g in range(max(gens.keys()) + 1 if gens else 0):
+                if g in gens and all(j in gens[g] for j in JUDGES):
+                    m_candidates.add(g + 1)
+                else:
+                    break
+        m_target = max(m_candidates) if m_candidates else 0
+    if m_target == 0:
+        return np.zeros((0, 0, K_TOT)), []
     complete = []
     for qid in sorted(model_data.keys()):
         gens = model_data[qid]
@@ -280,17 +296,18 @@ def compute_single_judge_table(all_tensors, n_rep, rng):
     return table
 
 
-def print_single_judge_table(table, n_rep):
+def print_single_judge_table(table, n_rep, benchmark=""):
     """Print and append table: mean ± 95% CI (evaluated model x judge)."""
     models = sorted({m for (m, j) in table})
     if not models or not JUDGES:
         return
 
+    bm_label = f" [{benchmark}]" if benchmark else ""
     lines = []
     lines.append("")
     lines.append("=" * 92)
     lines.append(
-        "MEAN SCORE ± 95% CI (all scenarios, 1 gen & 1 judge eval per scenario; CI from subsample Var)"
+        f"MEAN SCORE ± 95% CI{bm_label} (all scenarios, 1 gen & 1 judge eval per scenario; CI from subsample Var)"
     )
     lines.append("=" * 92)
     lines.append(f"  (n_rep = {n_rep} subsample replications per cell)")
@@ -324,13 +341,14 @@ def print_single_judge_table(table, n_rep):
     print("  Appended to results_summary.txt")
 
 
-def print_decomposition_table(all_comp, all_ci):
+def print_decomposition_table(all_comp, all_ci, benchmark=""):
     """Print and save variance decomposition as a formatted table."""
     models = [m for m in MODELS if m in all_comp]
 
+    bm_label = f" [{benchmark}]" if benchmark else ""
     lines = []
     lines.append("=" * 92)
-    lines.append("VARIANCE DECOMPOSITION")
+    lines.append(f"VARIANCE DECOMPOSITION{bm_label}")
     lines.append("=" * 92)
 
     header = f"{'Component':<28s}"
@@ -377,7 +395,7 @@ def print_decomposition_table(all_comp, all_ci):
 # ── Plotting ─────────────────────────────────────────────────────────────────
 
 
-def plot_judge_biases(all_comp):
+def plot_judge_biases(all_comp, prefix=""):
     """Heatmap of judge biases for each model."""
     models = [m for m in MODELS if m in all_comp]
     mat = np.zeros((len(JUDGES), len(models)))
@@ -385,7 +403,6 @@ def plot_judge_biases(all_comp):
         for jj, judge in enumerate(JUDGES):
             mat[jj, jm] = all_comp[model]["gamma"][judge]
 
-    # Standard single-column size (3.5" width); larger figure => text appears smaller
     fig, ax = plt.subplots(figsize=(3.5, 3.0))
     vmax = max(abs(mat.min()), abs(mat.max())) or 0.1
     im = ax.imshow(mat, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
@@ -408,9 +425,10 @@ def plot_judge_biases(all_comp):
             )
     cb = fig.colorbar(im, ax=ax, shrink=0.85)
     cb.set_label(r"Judge bias $\hat\gamma_\ell$", fontsize=8)
-    fig.savefig(PLOT_DIR / "judge_biases.pdf")
+    fname = f"{prefix}judge_biases.pdf"
+    fig.savefig(PLOT_DIR / fname)
     plt.close(fig)
-    print(f"  Saved {PLOT_DIR / 'judge_biases.pdf'}")
+    print(f"  Saved {PLOT_DIR / fname}")
 
 
 def subsample_benchmark(X, strategy, budget, n_rep, rng):
@@ -464,7 +482,7 @@ def compute_prediction_constants(X):
     return C_all, C_random, C_cycle
 
 
-def plot_strategy_comparison(all_tensors, n_rep=5000):
+def plot_strategy_comparison(all_tensors, n_rep=5000, prefix=""):
     """Empirical variance of benchmark score vs budget for three strategies,
     overlaid with exact theoretical predictions (dashed)."""
     models = [m for m in MODELS if m in all_tensors]
@@ -536,37 +554,41 @@ def plot_strategy_comparison(all_tensors, n_rep=5000):
     )
     for ax in axes[len(models) :]:
         ax.set_visible(False)
-    fig.savefig(PLOT_DIR / "strategy_comparison.pdf", bbox_inches="tight")
+    fname = f"{prefix}strategy_comparison.pdf"
+    fig.savefig(PLOT_DIR / fname, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved {PLOT_DIR / 'strategy_comparison.pdf'}")
+    print(f"  Saved {PLOT_DIR / fname}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
-def main():
+def _detect_benchmarks():
+    """Return list of benchmarks that have a judgements directory with data."""
+    found = []
+    for bm in ALL_BENCHMARKS:
+        jdir = DATA_DIR / bm / "judgements"
+        if jdir.is_dir() and any(jdir.iterdir()):
+            found.append(bm)
+    return found
+
+
+def run_benchmark(benchmark, quick=False):
+    """Run full analysis for a single benchmark."""
     global JUDGEMENTS_ROOT, BENCHMARK
-    p = argparse.ArgumentParser(description="Variance decomposition analysis")
-    p.add_argument("--quick", action="store_true", help="Fewer reps for fast check")
-    p.add_argument(
-        "--benchmark",
-        default="mt_bench",
-        choices=["mt_bench", "mind_eval"],
-        help="Data source: mt_bench (default) or mind_eval (data/mind_eval/judgements)",
-    )
-    args = p.parse_args()
+    BENCHMARK = benchmark
+    JUDGEMENTS_ROOT = DATA_DIR / benchmark / "judgements"
+    prefix = f"{benchmark}_"
 
-    BENCHMARK = args.benchmark
-    JUDGEMENTS_ROOT = DATA_DIR / args.benchmark / "judgements"
-
-    PLOT_DIR.mkdir(exist_ok=True)
-
+    print(f"\n{'#' * 80}")
+    print(f"# Benchmark: {benchmark}")
+    print(f"{'#' * 80}")
     print(f"Loading data from {JUDGEMENTS_ROOT}...")
     data = load_data()
 
     all_comp, all_ci, all_tensors = {}, {}, {}
-    n_rep = 500 if args.quick else 5000
-    bootstrap_B = 100 if args.quick else 2000
+    n_rep = 500 if quick else 5000
+    bootstrap_B = 100 if quick else 2000
 
     for model in MODELS:
         print(f"\nAnalyzing: {model}")
@@ -587,25 +609,52 @@ def main():
         all_tensors[model] = X
 
         print(
-            f"  \u03bc\u03b8={comp['mu']:.4f}  \u03c3\u00b2_D={comp['sig_ad']:.4f}  "
-            f"\u03c3\u00b2_\u03b8={comp['sig_beta']:.4f}  \u03c3\u00b2\u03b5={comp['sig_eps']:.4f}  "
-            f"\u03c3\u00b2\u03b3={comp['sig_gamma']:.4f}"
+            f"  μθ={comp['mu']:.4f}  σ²_D={comp['sig_ad']:.4f}  "
+            f"σ²_θ={comp['sig_beta']:.4f}  σ²ε={comp['sig_eps']:.4f}  "
+            f"σ²γ={comp['sig_gamma']:.4f}"
         )
 
     if not all_comp:
         print("\nNo models have enough data.")
         return
 
-    print_decomposition_table(all_comp, all_ci)
+    print_decomposition_table(all_comp, all_ci, benchmark=benchmark)
 
     rng = np.random.default_rng(42)
     single_judge_table = compute_single_judge_table(all_tensors, n_rep, rng)
-    print_single_judge_table(single_judge_table, n_rep)
+    print_single_judge_table(single_judge_table, n_rep, benchmark=benchmark)
 
-    plot_judge_biases(all_comp)
+    plot_judge_biases(all_comp, prefix=prefix)
 
     print(f"\nRunning strategy comparison ({n_rep} reps per budget point)...")
-    plot_strategy_comparison(all_tensors, n_rep=n_rep)
+    plot_strategy_comparison(all_tensors, n_rep=n_rep, prefix=prefix)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Variance decomposition analysis")
+    p.add_argument("--quick", action="store_true", help="Fewer reps for fast check")
+    p.add_argument(
+        "--benchmark",
+        nargs="*",
+        default=None,
+        help="Benchmark(s) to analyze (default: all with data). "
+        "Choices: mt_bench, mind_eval, theagentcompany",
+    )
+    args = p.parse_args()
+
+    PLOT_DIR.mkdir(exist_ok=True)
+
+    if args.benchmark is not None:
+        benchmarks = args.benchmark
+    else:
+        benchmarks = _detect_benchmarks()
+        if not benchmarks:
+            print("No benchmark data found under data/*/judgements/")
+            return
+        print(f"Auto-detected benchmarks with data: {benchmarks}")
+
+    for bm in benchmarks:
+        run_benchmark(bm, quick=args.quick)
 
 
 if __name__ == "__main__":

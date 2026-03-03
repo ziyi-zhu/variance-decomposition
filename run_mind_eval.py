@@ -46,16 +46,21 @@ MAX_WORKERS_INTERACTION = 5
 MAX_WORKERS_JUDGE = 5
 
 
-def openrouter_api_params(model_key: str, is_judge: bool = False) -> dict:
+def openrouter_api_params(
+    model_key: str, is_judge: bool = False, middle_out: bool = False
+) -> dict:
     """Build litellm api_params for OpenRouter. Relies on OPENROUTER_API_KEY in env."""
     mapping = JUDGES if is_judge else MODELS
     openrouter_id = mapping.get(model_key)
     if not openrouter_id:
         raise ValueError(f"Unknown model key: {model_key}")
-    return {
+    params = {
         "model": f"openrouter/{openrouter_id}",
         "max_tokens": 2048,
     }
+    if middle_out:
+        params["extra_body"] = {"transforms": ["middle-out"]}
+    return params
 
 
 def ensure_mind_eval_path():
@@ -152,6 +157,11 @@ def main():
     parser.add_argument(
         "--skip-judgments", action="store_true", help="Skip judgments (use existing)"
     )
+    parser.add_argument(
+        "--middle-out",
+        action="store_true",
+        help='Enable OpenRouter "middle-out" transform to auto-compress prompts that exceed context limits',
+    )
     args = parser.parse_args()
 
     num_generations = args.generations
@@ -190,12 +200,13 @@ def main():
         print(f"  Loaded {len(profiles)} profiles", flush=True)
 
     # Fixed member (client) engine; clinician varies per model under evaluation.
-    member_engine = InferenceEngine(
-        api_params={
-            "model": f"openrouter/{MEMBER_MODEL_OPENROUTER_ID}",
-            "max_tokens": 2048,
-        }
-    )
+    member_api_params = {
+        "model": f"openrouter/{MEMBER_MODEL_OPENROUTER_ID}",
+        "max_tokens": 2048,
+    }
+    if args.middle_out:
+        member_api_params["extra_body"] = {"transforms": ["middle-out"]}
+    member_engine = InferenceEngine(api_params=member_api_params)
     clinician_template = INTERACTION_CLINICIAN_VERSION_DICT[CLINICIAN_TEMPLATE_VERSION]
     member_template = INTERACTION_MEMBER_VERSION_DICT[MEMBER_TEMPLATE_VERSION]
 
@@ -225,7 +236,9 @@ def main():
             if model_key != current_model:
                 current_model = model_key
                 clinician_engine = InferenceEngine(
-                    api_params=openrouter_api_params(model_key, is_judge=False)
+                    api_params=openrouter_api_params(
+                        model_key, is_judge=False, middle_out=args.middle_out
+                    )
                 )
             profile_dict = profiles[profile_id]
             try:
@@ -279,9 +292,11 @@ def main():
             print("  All judgments already cached.", flush=True)
         else:
             print(f"  {len(task_list)} judgment tasks", flush=True)
+        judge_engines = {}
         for model_key, profile_id, g, judge_key, path in tqdm(
             task_list, desc="  Judging"
         ):
+            out_path = evaluation_cache_path(model_key, profile_id, g, judge_key)
             try:
                 with open(path) as f:
                     gen = json.load(f)
@@ -291,13 +306,19 @@ def main():
                 user_prompt = judge_prompt_template.substitute(
                     conversation_str=convo_str, **profile
                 )
-                judge_engine = InferenceEngine(
-                    api_params=openrouter_api_params(judge_key, is_judge=True)
-                )
+                if judge_key not in judge_engines:
+                    judge_engines[judge_key] = InferenceEngine(
+                        api_params=openrouter_api_params(
+                            judge_key, is_judge=True, middle_out=args.middle_out
+                        )
+                    )
+                judge_engine = judge_engines[judge_key]
                 messages = [{"role": "user", "content": user_prompt}]
                 unparsed, _ = judge_engine.generate_with_thinking(messages)
                 parsed = parse_judge_scores(unparsed)[0]
-                overall = parsed.get("Overall score") or parsed.get("Average score")
+                overall = parsed.get("Overall score")
+                if overall is None:
+                    overall = parsed.get("Average score")
                 if overall is None:
                     criteria = [
                         "Clinical Accuracy & Competence",
