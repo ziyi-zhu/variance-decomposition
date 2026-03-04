@@ -51,21 +51,12 @@ MODEL_LABELS = {
     "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
     "llama-3.3-70b-instruct": "Llama 3.3 70B",
     "gpt-5.2": "GPT-5.2",
-}
-JUDGE_LABELS = {
-    "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
-    "llama-3.3-70b-instruct": "Llama 3.3 70B",
-    "gpt-5.2": "GPT-5.2",
     "gemini-3-flash": "Gemini 3 Flash",
     "claude-sonnet-4.6": "Claude Sonnet 4.6",
 }
-# Fallback: use key as label for any model/judge not in LABELS
-for m in MODELS:
+for m in set(MODELS + JUDGES):
     if m not in MODEL_LABELS:
         MODEL_LABELS[m] = m
-for j in JUDGES:
-    if j not in JUDGE_LABELS:
-        JUDGE_LABELS[j] = j
 
 K_TOT = len(JUDGES)
 
@@ -316,7 +307,7 @@ def print_single_judge_table(table, n_rep, benchmark=""):
     col_w = 22
     header = f"{'Evaluated model':<22s}"
     for judge in JUDGES:
-        header += f" | {JUDGE_LABELS[judge]:>{col_w - 4}s}"
+        header += f" | {MODEL_LABELS[judge]:>{col_w - 4}s}"
     lines.append(header)
     lines.append("-" * 92)
     for model in models:
@@ -381,7 +372,7 @@ def print_decomposition_table(all_comp, all_ci, benchmark=""):
     lines.append(jh)
     lines.append("-" * 62)
     for judge in JUDGES:
-        jl = f"{JUDGE_LABELS[judge]:<20s}"
+        jl = f"{MODEL_LABELS[judge]:<20s}"
         for m in models:
             jl += f" | {all_comp[m]['gamma'][judge]:>+12.4f}"
         lines.append(jl)
@@ -409,7 +400,7 @@ def plot_judge_biases(all_comp, prefix=""):
     ax.set_xticks(range(len(models)))
     ax.set_xticklabels([MODEL_LABELS[m] for m in models], rotation=45, ha="right")
     ax.set_yticks(range(len(JUDGES)))
-    ax.set_yticklabels([JUDGE_LABELS[j] for j in JUDGES])
+    ax.set_yticklabels([MODEL_LABELS[j] for j in JUDGES])
     ax.set_xlabel("Evaluated model")
     ax.set_ylabel("Judge model")
     for jj in range(len(JUDGES)):

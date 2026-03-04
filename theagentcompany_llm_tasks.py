@@ -100,10 +100,10 @@ LLM_TASK_NAMES = [
     "hr-resume-screening",  # 2/4,  low   – visa-requirement conclusion
     "sde-report-agent-repos",  # 1/2,  low   – specific repo list
     # -- require VISION support from the judge (comment out for text-only judges)
-    "ds-stock-analysis-slides",  # 7/8,  high  – slide images: chart quality + script
-    "ds-visualize-data-in-pie-and-bar-chart",  # 4/4,  mod   – pie/bar chart images
-    "ml-generate-gradcam",  # 2/4,  mod   – GradCAM heatmap image comparison
-    "sde-create-new-gitlab-project-logo",  # 2/3,  mod   – project logo image: "letter S"
+    # "ds-stock-analysis-slides",  # 7/8,  high  – slide images: chart quality + script
+    # "ds-visualize-data-in-pie-and-bar-chart",  # 4/4,  mod   – pie/bar chart images
+    # "ml-generate-gradcam",  # 2/4,  mod   – GradCAM heatmap image comparison
+    # "sde-create-new-gitlab-project-logo",  # 2/3,  mod   – project logo image: "letter S"
 ]
 
 TASK_IMAGE_TAG = "1.0.0"

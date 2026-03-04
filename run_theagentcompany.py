@@ -312,7 +312,7 @@ def run_generations_via_openhands(
                         cwd=repo_root,
                         capture_output=True,
                         text=True,
-                        timeout=3600,
+                        timeout=7200,
                     )
                     if result.returncode != 0:
                         raise subprocess.CalledProcessError(
@@ -339,7 +339,12 @@ def run_generations_via_openhands(
                             f"  then from TheAgentCompany/: poetry run python evaluation/run_eval.py --config-file <path> --task-image-name {image_name} --build-image-only True",
                             file=sys.stderr,
                         )
-                    out_for_hint = (getattr(e, "stdout", "") or "") + (getattr(e, "stderr", "") or "")
+                    _raw_out = getattr(e, "stdout", None) or b""
+                    _raw_err = getattr(e, "stderr", None) or b""
+                    out_for_hint = (
+                        (_raw_out.decode("utf-8", errors="replace") if isinstance(_raw_out, bytes) else _raw_out)
+                        + (_raw_err.decode("utf-8", errors="replace") if isinstance(_raw_err, bytes) else _raw_err)
+                    )
                     if out_for_hint and (
                         "Failed to connect" in out_for_hint
                         or "the-agent-company.com" in out_for_hint

@@ -28,6 +28,8 @@ MODELS = {
     "qwen-2.5-7b-instruct": "qwen/qwen-2.5-7b-instruct",
     "llama-3.3-70b-instruct": "meta-llama/llama-3.3-70b-instruct",
     "gpt-5.2": "openai/gpt-5.2",
+    "gemini-3-flash": "google/gemini-3-flash-preview",
+    "claude-sonnet-4.6": "anthropic/claude-sonnet-4.6",
 }
 
 JUDGES = {
