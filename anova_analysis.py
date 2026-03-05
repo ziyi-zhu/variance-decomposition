@@ -6,6 +6,7 @@ Produces:
   2. Scenario-vs-generation tradeoff plot under cycling
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -48,25 +49,17 @@ MODEL_LABELS = {
     "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
     "llama-3.3-70b-instruct": "Llama 3.3 70B",
     "gpt-5.2": "GPT-5.2",
-}
-JUDGE_LABELS = {
-    "qwen-2.5-7b-instruct": "Qwen 2.5 7B",
-    "llama-3.3-70b-instruct": "Llama 3.3 70B",
-    "gpt-5.2": "GPT-5.2",
     "gemini-3-flash": "Gemini 3 Flash",
     "claude-sonnet-4.6": "Claude Sonnet 4.6",
 }
-for m in MODELS:
+for m in set(MODELS + JUDGES):
     if m not in MODEL_LABELS:
         MODEL_LABELS[m] = m
-for j in JUDGES:
-    if j not in JUDGE_LABELS:
-        JUDGE_LABELS[j] = j
 
 K_TOT = len(JUDGES)
 PLOT_DIR = Path("plots")
 DATA_DIR = Path("data")
-JUDGEMENTS_ROOT = DATA_DIR / "mt_bench" / "judgements"
+ALL_BENCHMARKS = ["mt_bench", "mind_eval", "theagentcompany"]
 
 
 def _load_json(path):
@@ -76,15 +69,46 @@ def _load_json(path):
     return None
 
 
-def load_tensor(model, m_target=10):
-    """Load (n, m, K) tensor from new cache: data/mt_bench/judgements/{model}/{qid}/{index}/{judge}.json"""
-    data = {}
-    if not JUDGEMENTS_ROOT.exists():
-        return np.zeros((0, m_target, K_TOT))
+def _score_from_judgment_obj(obj, benchmark: str):
+    """Extract single score from judgment JSON. mt_bench: turn1/turn2; mind_eval/theagentcompany: top-level score (fallback: turn1/turn2)."""
+    if benchmark in ("mind_eval", "theagentcompany"):
+        s = obj.get("score")
+        if s is not None:
+            return float(s)
+    t1 = (
+        obj.get("turn1")
+        if isinstance(obj.get("turn1"), dict)
+        else None
+    )
+    t2 = (
+        obj.get("turn2")
+        if isinstance(obj.get("turn2"), dict)
+        else None
+    )
+    s1 = t1.get("score") if t1 else None
+    s2 = t2.get("score") if t2 else None
+    if s1 is not None and s2 is not None:
+        return (s1 + s2) / 2.0
+    if s1 is not None:
+        return s1
+    if s2 is not None:
+        return s2
+    return None
 
-    model_dir = JUDGEMENTS_ROOT / model
+
+def load_tensor(model, judgements_root: Path, benchmark: str, m_target=None):
+    """Load (n, m, K) tensor from cache: {judgements_root}/{model}/{qid}/{index}/{judge}.json.
+
+    If m_target is None, auto-detect the largest m for which at least one
+    scenario is complete (same as analyze_results.build_tensor).
+    """
+    data = {}
+    if not judgements_root.exists():
+        return np.zeros((0, 0, K_TOT))
+
+    model_dir = judgements_root / model
     if not model_dir.is_dir():
-        return np.zeros((0, m_target, K_TOT))
+        return np.zeros((0, 0, K_TOT))
 
     for qid_dir in model_dir.iterdir():
         if not qid_dir.is_dir():
@@ -106,17 +130,25 @@ def load_tensor(model, m_target=10):
                     obj = _load_json(path)
                     if obj is None:
                         continue
-                    t1 = obj.get("turn1") if isinstance(obj.get("turn1"), dict) else None
-                    t2 = obj.get("turn2") if isinstance(obj.get("turn2"), dict) else None
-                    s1 = t1.get("score") if t1 else None
-                    s2 = t2.get("score") if t2 else None
-                    if s1 is not None and s2 is not None:
-                        avg = (s1 + s2) / 2.0
-                    else:
+                    avg = _score_from_judgment_obj(obj, benchmark)
+                    if avg is None:
                         continue
                     data.setdefault(question_id, {}).setdefault(index, {})[
                         judge_name
                     ] = avg
+
+    # Auto-detect m_target like analyze_results.build_tensor
+    if m_target is None:
+        m_candidates = set()
+        for qid, gens in data.items():
+            for g in range(max(gens.keys()) + 1 if gens else 0):
+                if g in gens and all(j in gens[g] for j in JUDGES):
+                    m_candidates.add(g + 1)
+                else:
+                    break
+        m_target = max(m_candidates) if m_candidates else 0
+    if m_target == 0:
+        return np.zeros((0, 0, K_TOT))
 
     complete = [
         qid
@@ -191,15 +223,20 @@ def estimate_components(X):
     }
 
 
-def scenario_gen_tradeoff_plot(all_tensors, n_rep=5000):
+def scenario_gen_tradeoff_plot(all_tensors, n_rep=5000, prefix=""):
     """
     For fixed total budget B_gen = n*m, show Var(X-bar) vs budget-per-scenario
     under cycling.  Both scenarios and generations are bootstrapped (with
     replacement), matching the strategy-comparison methodology.
 
-    Exact prediction: V(m) = (C_within + m * C_between) / B_gen
-      C_between = pop. variance of scenario-level cycling-pool means
-      C_within  = avg within-scenario cycling-pool variance
+    The bootstrap assigns judge = position % K (not generation_index % K),
+    so the variance components must come from the full tensor, not the
+    cycling pool.
+
+    Exact prediction (for m divisible by K):
+      V(m) = (C_within + m * C_between) / B_gen
+      C_between = Var_i( mean over all judges and gens for scenario i )
+      C_within  = mean over (scenario, judge) of Var_gen(X[i, :, k])
     """
     models = [m for m in MODELS if m in all_tensors]
     K = K_TOT
@@ -216,13 +253,10 @@ def scenario_gen_tradeoff_plot(all_tensors, n_rep=5000):
         X = all_tensors[model]
         n_full, m_full, K_full = X.shape
 
-        cycling_pool = np.zeros((n_full, m_full))
-        for g in range(m_full):
-            cycling_pool[:, g] = X[:, g, g % K_full]
-
-        scenario_means = cycling_pool.mean(axis=1)
-        C_between = float(np.var(scenario_means))
-        C_within = float(np.mean(np.var(cycling_pool, axis=1)))
+        mu_ik = X.mean(axis=1)                    # (n, K) mean over generations
+        mu_i = mu_ik.mean(axis=1)                  # (n,)  mean over gens & judges
+        C_between = float(np.var(mu_i))
+        C_within = float(np.mean(np.var(X, axis=1)))  # mean gen-variance per (scenario, judge)
 
         rng = np.random.default_rng(42)
         emp_vars = []
@@ -260,26 +294,43 @@ def scenario_gen_tradeoff_plot(all_tensors, n_rep=5000):
     )
     for ax in axes[len(models) :]:
         ax.set_visible(False)
-    outpath = PLOT_DIR / "scenario_generation_tradeoff.pdf"
+    fname = f"{prefix}scenario_generation_tradeoff.pdf"
+    outpath = PLOT_DIR / fname
     fig.savefig(outpath, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {outpath}")
 
 
-if __name__ == "__main__":
-    PLOT_DIR.mkdir(exist_ok=True)
+def _detect_benchmarks():
+    """Return list of benchmarks that have a judgements directory with data."""
+    found = []
+    for bm in ALL_BENCHMARKS:
+        jdir = DATA_DIR / bm / "judgements"
+        if jdir.is_dir() and any(jdir.iterdir()):
+            found.append(bm)
+    return found
 
-    print("=" * 70)
-    print("ANOVA F-TEST FOR JUDGE EFFECTS")
-    print("=" * 70)
+
+def run_benchmark(benchmark: str, n_rep=5000):
+    """Run ANOVA F-test and scenario-vs-generation tradeoff for a single benchmark."""
+    judgements_root = DATA_DIR / benchmark / "judgements"
+    prefix = f"{benchmark}_"
+
+    print(f"\n{'#' * 70}")
+    print(f"# Benchmark: {benchmark}")
+    print(f"{'#' * 70}")
+    print(f"Loading data from {judgements_root}...")
 
     all_tensors = {}
     all_comps = {}
 
     for model in MODELS:
-        X = load_tensor(model)
+        X = load_tensor(model, judgements_root, benchmark)
         all_tensors[model] = X
         n, m, K = X.shape
+        if X.shape[0] == 0:
+            print(f"  {MODEL_LABELS[model]}: SKIPPED — no data")
+            continue
         F, p, df1, df2 = anova_judge_test(X)
         comp = estimate_components(X)
         all_comps[model] = comp
@@ -287,23 +338,25 @@ if __name__ == "__main__":
         print(f"\n{MODEL_LABELS[model]} (n={n}, m={m}, K={K}):")
         print(f"  F({df1}, {df2}) = {F:.1f},  p = {p:.2e}")
 
+    if not all_comps:
+        print("\nNo models have enough data for this benchmark.")
+        return
+
     print("\n")
     print("=" * 70)
-    print("SCENARIO vs. GENERATION TRADEOFF (under cycling, B_gen=400)")
+    print(f"SCENARIO vs. GENERATION TRADEOFF [{benchmark}] (under cycling, B_gen=400)")
     print("=" * 70)
     print("\nV(m) = (C_within + m * C_between) / B_gen")
     print("Linear in m => minimized at m=1 (maximize scenarios)\n")
 
     B_gen = 400
-    for model in MODELS:
+    for model in all_comps:
         X = all_tensors[model]
-        n_full, m_full, K = X.shape
-        cycling_pool = np.zeros((n_full, m_full))
-        for g in range(m_full):
-            cycling_pool[:, g] = X[:, g, g % K]
-        scenario_means = cycling_pool.mean(axis=1)
-        C_between = float(np.var(scenario_means))
-        C_within = float(np.mean(np.var(cycling_pool, axis=1)))
+        n_full, m_full, K_full = X.shape
+        mu_ik = X.mean(axis=1)
+        mu_i = mu_ik.mean(axis=1)
+        C_between = float(np.var(mu_i))
+        C_within = float(np.mean(np.var(X, axis=1)))
 
         var_m1 = (C_within + 1 * C_between) / B_gen
         var_m10 = (C_within + 10 * C_between) / B_gen
@@ -314,5 +367,49 @@ if __name__ == "__main__":
         print()
 
     print("Generating scenario-vs-generation tradeoff plot...")
-    scenario_gen_tradeoff_plot(all_tensors, n_rep=5000)
+    scenario_gen_tradeoff_plot(all_tensors, n_rep=n_rep, prefix=prefix)
+    print(f"Done with {benchmark}.")
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="ANOVA judge-effect test and scenario-vs-generation tradeoff"
+    )
+    p.add_argument(
+        "--benchmark",
+        nargs="*",
+        default=None,
+        help="Benchmark(s) to analyze (default: all with data). "
+        "Choices: mt_bench, mind_eval, theagentcompany",
+    )
+    p.add_argument(
+        "--n-rep",
+        type=int,
+        default=5000,
+        help="Number of bootstrap reps for tradeoff plot (default: 5000)",
+    )
+    args = p.parse_args()
+
+    PLOT_DIR.mkdir(exist_ok=True)
+
+    if args.benchmark is not None:
+        benchmarks = args.benchmark
+    else:
+        benchmarks = _detect_benchmarks()
+        if not benchmarks:
+            print("No benchmark data found under data/*/judgements/")
+            return
+        print(f"Auto-detected benchmarks with data: {benchmarks}")
+
+    print("=" * 70)
+    print("ANOVA F-TEST FOR JUDGE EFFECTS")
+    print("=" * 70)
+
+    for bm in benchmarks:
+        run_benchmark(bm, n_rep=args.n_rep)
+
     print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()

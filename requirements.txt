@@ -4,3 +4,4 @@ aiohttp>=3.9
 litellm>=1.59.8
 jsonargparse
 tqdm>=4.23.0
+scikit-learn
